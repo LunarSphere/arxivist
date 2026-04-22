@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 // if we fetch a site like this with request we'll get bare htlm. because reqwest only makes html request
 // to load the bage we need the API, a headless browserlike (selinium), scraping service. 
 
-
+//bassically an object that represents a single crawler
 struct CrawlerState{
     //track client visited limiter
     client:Client,
@@ -48,9 +48,20 @@ struct CrawlerState{
 
 impl CrawlerState{
     //Todo a fn for rquests per second
-    // var for quota 
-    // var for limiter
-
+    fn new(requests_per_second: u32) -> Self{
+        let client = Client::builder()
+            .user_agent("")
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to build HTTP client");
+        let quota = Quota::per_second(NonZeroU32::new(requests_per_second).unwrap());
+        let limiter = RateLimiter::direct(quota);
+        Self{
+            client,
+            visited: DashSet::new(),
+            limiter,
+        }
+    }
 }
 
 
