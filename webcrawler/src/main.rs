@@ -11,12 +11,50 @@ use select::document::Document;
 use select::predicate::Name;
 use url::Url;
 use std::collections::VecDeque;
+use std::collections::HashSet;
+use anyhow::Result;
+use dashmap::DashSet; //we use this b/c its safe for multiple threads
+use governor::{Quota, RateLimiter};
+use reqwest::Client;
+use scraper::{Html, Selector};
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+
+//TODO: add error handling, 
+// respect robots.txt ->
+// add delay between requests, 
+// limit crawl depth, 
+// handle dynamic content, 
+// add user-agent header, 
+// implement concurrency with tokio tasks. 
+
+//some pages are dynamic. the load their content with JS after page loads. 
+// if we fetch a site like this with request we'll get bare htlm. because reqwest only makes html request
+// to load the bage we need the API, a headless browserlike (selinium), scraping service. 
+
+
+struct CrawlerState{
+    //track client visited limiter
+    client:Client,
+    visited:DashSet<String>,
+    limiter: RateLimiter<
+        governor::state::NotKeyed,
+        governor::state::InMemoryState,
+        governor::clock::DefaultClock,
+    >
+}
+
+impl CrawlerState{
+    //Todo a fn for rquests per second
+    // var for quota 
+    // var for limiter
+
+}
 
 
 
-
-//TODO: add error handling, respect robots.txt~, add delay between requests, limit crawl depth, handle dynamic content, add user-agent header, implement concurrency with tokio tasks. 
-//TODO: avoid revisiting urls 
 
 // collect urls can fail so we must update the function signature to return an error
 async fn collecturls(seed: &str) -> Result<Vec<String>, Box<dyn std::error::Error>>{
@@ -48,24 +86,22 @@ async fn collecturls(seed: &str) -> Result<Vec<String>, Box<dyn std::error::Erro
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut queue = VecDeque::new();
+    let mut visited = HashSet::new(); // set of unique elements for tracking visited urls
     queue.push_back("https://books.toscrape.com/".to_string());
-
     
-    while let Some(links) = queue.pop_front(){
-        let new_links = collecturls(&links).await?;
-        for link in new_links{
-            println!("{}", link);
-            queue.push_back(link)
+    while let Some(link) = queue.pop_front() {
+        if visited.contains(&link) {
+            continue;
+        }
+        visited.insert(link.clone()); // its optimal to mark as visited prior to for loop
+        let new_links = collecturls(&link).await?;
+        for new_link in new_links {
+            if !visited.contains(&new_link) {
+                println!("{}", new_link);
+                queue.push_back(new_link);
+            }
         }
     }
 
     Ok(()) //this line means we executed the code without any errors
 }
-
-
-//some pages are dynamic. the load their content with JS after page loads. 
-// if we fetch a site like this with request we'll get bare htlm. because reqwest only makes html request
-// to load the bage we need the API, a headless browserlike (selinium), scraping service. 
-
-//4/19 
-// implemented a basic webcrawler in rust
