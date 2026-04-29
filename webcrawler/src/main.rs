@@ -1,62 +1,70 @@
-/* 
-* I want to build a web crawler in rust, 
-* dependenceies I'll need tokio, reqwest, scraper, url 
-* web crawler process
-* start with seed url, fetch page, parse html, extract links, and content, add new urls to queue, repeat
-* respect robots.txt, we are crawling and scraping, crawliing is IO-bound so we need tokio for concurrency 
-* 
- */
-// use thiserror::Error;
-use select::document::Document;
-use select::predicate::Name;
-use url::Url;
-use std::collections::VecDeque;
-use std::collections::HashSet;
+// ============================================================
+//  Async Web Crawler Lab — Starter Code
+//  CS [XXX]: Systems Programming with Rust
+// ============================================================
+//
+//  LEARNING OBJECTIVES
+//  -------------------
+//  By the end of this lab you will be able to:
+//    1. Explain the difference between synchronous and async I/O.
+//    2. Write async functions using `async fn` and `.await`.
+//    3. Spawn concurrent tasks with `tokio::spawn`.
+//    4. Share state safely across tasks using `Arc`.
+//    5. Use a rate limiter to be a "polite" crawler.
+//    6. Extract links from HTML and build a crawl frontier.
+//
+//  INSTRUCTIONS
+//  ------------
+//  Search for every comment that starts with  👉 TODO  and
+//  implement the missing code.  The program should compile and
+//  run with zero TODOs remaining.
+//
+//  Run with:
+//    cargo run
+//
+//  Expected final output (approximate):
+//    INFO crawler: crawled url=https://example.com
+//    INFO crawler: crawled url=...
+//    Finished crawling 42 unique URLs
+// ============================================================
+
 use anyhow::Result;
-use dashmap::DashSet; //we use this b/c its safe for multiple threads
+use async_channel::{Receiver, Sender};
+use dashmap::DashSet;
 use governor::{Quota, RateLimiter};
 use reqwest::Client;
 use scraper::{Html, Selector};
 use std::num::NonZeroU32;
-use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::time::Duration;
+use tracing::info;
+use url::Url;
 
-
-//TODO: add error handling, 
-// respect robots.txt ->
-// add delay between requests, 
-// limit crawl depth, 
-// handle dynamic content, 
-// add user-agent header, 
-// implement concurrency with tokio tasks. 
-
-//some pages are dynamic. the load their content with JS after page loads. 
-// if we fetch a site like this with request we'll get bare htlm. because reqwest only makes html request
-// to load the bage we need the API, a headless browserlike (selinium), scraping service. 
-
-//bassically an object that represents a single crawler
-struct CrawlerState{
-    //track client visited limiter
-    client:Client,
-    visited:DashSet<String>,
-    limiter: RateLimiter<
-        governor::state::NotKeyed,
-        governor::state::InMemoryState,
-        governor::clock::DefaultClock,
-    >
+//  `CrawlerState` holds everything that must be shared across
+//  all concurrent crawl tasks.  It is wrapped in an `Arc` so
+//  it can be cloned cheaply and sent to many tasks.
+struct CrawlerState {
+    client: Client,
+    visited: DashSet<String>,
+    limiter: governor::DefaultDirectRateLimiter,
 }
 
-impl CrawlerState{
-    //Todo a fn for rquests per second
-    fn new(requests_per_second: u32) -> Self{
+impl CrawlerState {
+    /// `requests_per_second` — how many HTTP requests we are
+    /// allowed to make every second across ALL tasks combined.
+    fn new(requests_per_second: u32) -> Self {
         let client = Client::builder()
-            .user_agent("")
-            .timeout(std::time::Duration::from_secs(10))
+            .user_agent("CrawlerLab/1.0 (university course)")
+            .timeout(Duration::from_secs(10))
             .build()
             .expect("failed to build HTTP client");
-        let quota = Quota::per_second(NonZeroU32::new(requests_per_second).unwrap());
+        let quota =
+            Quota::per_second(NonZeroU32::new(requests_per_second).unwrap());
         let limiter = RateLimiter::direct(quota);
-        Self{
+        Self {
             client,
             visited: DashSet::new(),
             limiter,
@@ -64,55 +72,204 @@ impl CrawlerState{
     }
 }
 
+// ============================================================
+//  PART 2 — FETCHING A PAGE  (async fn)
+//  ============================================================
+//
+//  This is the core async function.  It:
+//    1. Waits for a rate-limit token.
+//    2. Sends an HTTP GET request and awaits the response.
+//    3. Checks the status code and Content-Type.
+//    4. Parses the HTML and extracts every <a href="…"> link.
+//    5. Sends newly-discovered absolute URLs down `link_tx`.
 
+async fn crawl_page(
+    state: Arc<CrawlerState>,
+    url: Url,
+    link_tx: Sender<Url>,
+    in_flight: Arc<AtomicUsize>,
+) -> Result<()> {
+    // Await the rate limiter.
+    state.limiter.until_ready().await;
 
+    // Send the GET request and await the response.
+    let response = state.client.get(url.clone()).send().await?;
 
-// collect urls can fail so we must update the function signature to return an error
-async fn collecturls(seed: &str) -> Result<Vec<String>, Box<dyn std::error::Error>>{
-    let base_url = Url::parse(seed)?;
-
-    //grab body of the urlpage
-    let body = reqwest::get(base_url.as_str())
-    .await? //wait for the page to respond
-    .text() //process information as text. 
-    .await?;
-
-    // list of links
-    let links: Vec<String> = Document::from(body.as_str())
-      .find(Name("a"))
-      .filter_map(|node| node.attr("href"))
-      .filter_map(|href| {
-        if href.starts_with('#') || href.is_empty(){
-            return None;
-        }
-        base_url.join(href).ok().map(|url| url.to_string())
-      })
-      .collect();
-
-      return Ok(links);
-}
-
-//url lets us add relative urls to base urls
-#[tokio::main] //designates main as an async function 
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-
-    let mut queue = VecDeque::new();
-    let mut visited = HashSet::new(); // set of unique elements for tracking visited urls
-    queue.push_back("https://books.toscrape.com/".to_string());
-    
-    while let Some(link) = queue.pop_front() {
-        if visited.contains(&link) {
-            continue;
-        }
-        visited.insert(link.clone()); // its optimal to mark as visited prior to for loop
-        let new_links = collecturls(&link).await?;
-        for new_link in new_links {
-            if !visited.contains(&new_link) {
-                println!("{}", new_link);
-                queue.push_back(new_link);
-            }
-        }
+    //check for failed urls and non text/html
+    if !response.status().is_success() {
+        tracing::warn!(url = %url, status = %response.status(), "non-success status, skipping");
+        in_flight.fetch_sub(1, Ordering::SeqCst);
+        return Ok(());
     }
 
-    Ok(()) //this line means we executed the code without any errors
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !content_type.contains("text/html"){
+        in_flight.fetch_sub(1, Ordering::SeqCst);
+        return Ok(())
+    }
+
+    // Await the body text.
+    let body: String = response.text().await?;
+
+    // Parse HTML and extract links.
+    let links = {
+        let document = Html::parse_document(&body);
+        // Build the CSS selector for anchor tags
+        let selector = Selector::parse("a[href]").unwrap();
+
+        let mut links = Vec::new();
+        for element in document.select(&selector) {
+            if let Some(href) = element.value().attr("href"){
+                if let Ok(absolute) = url.join(href){
+                    if absolute.scheme() == "http" || absolute.scheme() == "https"{
+                        let key = absolute.to_string();
+                        if state.visited.insert(key){
+                            links.push(absolute);
+                        }
+                    }
+                }
+            }
+        }
+        links
+    }; // document dropped here before any await
+
+    for link in links {
+        let _ = link_tx.send(link).await;
+    }
+
+    info!(url = %url, "crawled successfully");
+
+    // Mark this task as done.
+    in_flight.fetch_sub(1, Ordering::SeqCst);
+    Ok(())
 }
+
+
+//  Each worker loops forever, receiving URLs from the shared
+//  channel and calling `crawl_page` on each one.
+// The loop exits when the channel is closed (all senders have been dropped)
+
+async fn worker(
+    state: Arc<CrawlerState>,
+    link_rx: Receiver<Url>,
+    link_tx: Sender<Url>,
+    in_flight: Arc<AtomicUsize>,){
+    while let Ok(link) = link_rx.recv().await {
+        let state = Arc::clone(&state);
+        let tx = link_tx.clone();
+        let counter = Arc::clone(&in_flight);
+
+        let crawl_future = crawl_page(state, link, tx, counter);
+        tokio::spawn(async move {
+            if let Err(e) = crawl_future.await {
+                tracing::error!("crawl failed: {e}");
+            }
+        });
+    }
+}
+
+
+// ============================================================
+//  PART 4 — MAIN: wire everything together
+//  ============================================================
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // logging
+    tracing_subscriber::fmt::init();
+
+    // ----------------------------------------------------------
+    // Configuration — feel free to adjust these values.
+    // ----------------------------------------------------------
+    let requests_per_second: u32 = 10;  // stay polite
+    let num_workers: usize      = 20;   // concurrent tasks
+    let seed_urls = vec![
+        "https://example.com",
+        // Add more seed URLs here if you like.
+    ];
+
+    // ----------------------------------------------------------
+    // STEP 4-A: Create shared state and channel.
+    //
+    // `async_channel::bounded` creates a channel with a fixed
+    // buffer.  Multiple producers (workers discovering links)
+    // and multiple consumers (workers fetching pages) can use
+    // the same channel — unlike `tokio::mpsc`.
+    // ----------------------------------------------------------
+
+    let state = Arc::new(CrawlerState::new(requests_per_second));
+
+    //Create a bounded async-channel with a capacity of 10_000 URLs.
+    //let (link_tx, link_rx) = async_channel::bounded(10_000);
+    let (link_tx, link_rx): (Sender<Url>, Receiver<Url>) = async_channel::bounded(10000);
+
+    // `in_flight` counts URLs that have been queued but not yet
+    // fully processed.  When it reaches 0, crawling is done.
+    let in_flight = Arc::new(AtomicUsize::new(0));
+
+
+    //Seed the crawl queue.
+    for seed in seed_urls{
+        let url = Url::parse(&seed)?;
+        state.visited.insert(url.to_string());
+        link_tx.send(url).await?;
+        in_flight.fetch_add(1, Ordering::SeqCst);
+    }
+
+    // ----------------------------------------------------------
+    // STEP 4-C: Spawn worker tasks.
+    //
+    // Use `tokio::spawn` to launch `num_workers` async tasks.
+    // Each task gets a clone of:
+    //   • `state`      (Arc — cheap clone)
+    //   • `link_rx`    (Receiver — clone allowed by async-channel)
+    //   • `link_tx`    (Sender — clone allowed by async-channel)
+    //   • `in_flight`  (Arc — cheap clone)
+    //
+    // Collect the JoinHandles so we can await them later.
+    // ----------------------------------------------------------
+
+    // 👉 TODO (4-C): Spawn `num_workers` worker tasks.
+    let mut handles = Vec::new();
+    for _ in 0..num_workers {
+        let state = Arc::clone(&state);
+        let link_rx = link_rx.clone();
+        let link_tx = link_tx.clone();
+        let in_flight = Arc::clone(&in_flight);
+        handles.push(tokio::spawn(worker(state, link_rx, link_tx, in_flight)));
+    }
+
+    // ----------------------------------------------------------
+    // STEP 4-D: Wait for crawling to finish.
+    //
+    // Drop the original `link_tx` here.  The workers hold their
+    // own clones; once they are all done AND `in_flight` hits 0,
+    // every sender will be dropped and `link_rx.recv()` will
+    // return `Err`, causing workers to exit.
+    //
+    // Then await all JoinHandles.
+    // ----------------------------------------------------------
+
+    // 👉 TODO (4-D): Drop link_tx and await all handles.
+    drop(link_tx);
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    println!(
+        "\nFinished crawling {} unique URLs",
+        state.visited.len()
+    );
+
+    Ok(())
+}
+
+// ============================================================
+//  BONUS CHALLENGES  (implement after the core lab is working)
+// ============================================================
