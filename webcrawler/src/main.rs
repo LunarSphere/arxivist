@@ -1,49 +1,19 @@
-// ============================================================
-//  Async Web Crawler Lab — Starter Code
-//  CS [XXX]: Systems Programming with Rust
-// ============================================================
-//
-//  LEARNING OBJECTIVES
-//  -------------------
-//  By the end of this lab you will be able to:
-//    1. Explain the difference between synchronous and async I/O.
-//    2. Write async functions using `async fn` and `.await`.
-//    3. Spawn concurrent tasks with `tokio::spawn`.
-//    4. Share state safely across tasks using `Arc`.
-//    5. Use a rate limiter to be a "polite" crawler.
-//    6. Extract links from HTML and build a crawl frontier.
-//
-//  INSTRUCTIONS
-//  ------------
-//  Search for every comment that starts with  👉 TODO  and
-//  implement the missing code.  The program should compile and
-//  run with zero TODOs remaining.
-//
-//  Run with:
-//    cargo run
-//
-//  Expected final output (approximate):
-//    INFO crawler: crawled url=https://example.com
-//    INFO crawler: crawled url=...
-//    Finished crawling 42 unique URLs
-// ============================================================
-
-use anyhow::Result;
-use async_channel::{Receiver, Sender};
-use dashmap::DashSet;
-use governor::{Quota, RateLimiter};
-use reqwest::Client;
-use scraper::{Html, Selector};
+use anyhow::Result; // failures will be returned alongside the result
+use async_channel::{Receiver, Sender}; // allows concurrent communication between tasks
+use dashmap::DashSet; // thread-safe set for tracking visited URLs **replaces hashset**
+use governor::{Quota, RateLimiter}; // rate limiting for HTTP requests
+use reqwest::Client; // HTTP client for making requests
+use scraper::{Html, Selector}; // HTML parsing and CSS selector matching
 use std::num::NonZeroU32;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
 use tracing::info;
-use url::Url;
+use url::Url; // URL parsing
 
-//  `CrawlerState` holds everything that must be shared across
+//  CrawlerState holds everything that must be shared across
 //  all concurrent crawl tasks.  It is wrapped in an `Arc` so
 //  it can be cloned cheaply and sent to many tasks.
 struct CrawlerState {
@@ -57,12 +27,11 @@ impl CrawlerState {
     /// allowed to make every second across ALL tasks combined.
     fn new(requests_per_second: u32) -> Self {
         let client = Client::builder()
-            .user_agent("CrawlerLab/1.0 (university course)")
+            .user_agent("Archivist/toySearchengine-1.0")
             .timeout(Duration::from_secs(10))
             .build()
             .expect("failed to build HTTP client");
-        let quota =
-            Quota::per_second(NonZeroU32::new(requests_per_second).unwrap());
+        let quota = Quota::per_second(NonZeroU32::new(requests_per_second).unwrap());
         let limiter = RateLimiter::direct(quota);
         Self {
             client,
@@ -71,12 +40,7 @@ impl CrawlerState {
         }
     }
 }
-
-// ============================================================
-//  PART 2 — FETCHING A PAGE  (async fn)
-//  ============================================================
-//
-//  This is the core async function.  It:
+// Async function
 //    1. Waits for a rate-limit token.
 //    2. Sends an HTTP GET request and awaits the response.
 //    3. Checks the status code and Content-Type.
@@ -108,9 +72,9 @@ async fn crawl_page(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !content_type.contains("text/html"){
+    if !content_type.contains("text/html") {
         in_flight.fetch_sub(1, Ordering::SeqCst);
-        return Ok(())
+        return Ok(());
     }
 
     // Await the body text.
@@ -124,11 +88,11 @@ async fn crawl_page(
 
         let mut links = Vec::new();
         for element in document.select(&selector) {
-            if let Some(href) = element.value().attr("href"){
-                if let Ok(absolute) = url.join(href){
-                    if absolute.scheme() == "http" || absolute.scheme() == "https"{
+            if let Some(href) = element.value().attr("href") {
+                if let Ok(absolute) = url.join(href) {
+                    if absolute.scheme() == "http" || absolute.scheme() == "https" {
                         let key = absolute.to_string();
-                        if state.visited.insert(key){
+                        if state.visited.insert(key) {
                             links.push(absolute);
                         }
                     }
@@ -136,9 +100,11 @@ async fn crawl_page(
             }
         }
         links
-    }; // document dropped here before any await
+    };
 
+    // Send all links to the channel.
     for link in links {
+        in_flight.fetch_add(1, Ordering::SeqCst);
         let _ = link_tx.send(link).await;
     }
 
@@ -149,7 +115,6 @@ async fn crawl_page(
     Ok(())
 }
 
-
 //  Each worker loops forever, receiving URLs from the shared
 //  channel and calling `crawl_page` on each one.
 // The loop exits when the channel is closed (all senders have been dropped)
@@ -158,7 +123,8 @@ async fn worker(
     state: Arc<CrawlerState>,
     link_rx: Receiver<Url>,
     link_tx: Sender<Url>,
-    in_flight: Arc<AtomicUsize>,){
+    in_flight: Arc<AtomicUsize>,
+) {
     while let Ok(link) = link_rx.recv().await {
         let state = Arc::clone(&state);
         let tx = link_tx.clone();
@@ -173,34 +139,15 @@ async fn worker(
     }
 }
 
-
-// ============================================================
-//  PART 4 — MAIN: wire everything together
-//  ============================================================
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // logging
     tracing_subscriber::fmt::init();
 
-    // ----------------------------------------------------------
-    // Configuration — feel free to adjust these values.
-    // ----------------------------------------------------------
-    let requests_per_second: u32 = 10;  // stay polite
-    let num_workers: usize      = 20;   // concurrent tasks
-    let seed_urls = vec![
-        "https://example.com",
-        // Add more seed URLs here if you like.
-    ];
-
-    // ----------------------------------------------------------
-    // STEP 4-A: Create shared state and channel.
-    //
-    // `async_channel::bounded` creates a channel with a fixed
-    // buffer.  Multiple producers (workers discovering links)
-    // and multiple consumers (workers fetching pages) can use
-    // the same channel — unlike `tokio::mpsc`.
-    // ----------------------------------------------------------
+    //configuration
+    let requests_per_second: u32 = 10; // stay polite
+    let num_workers: usize = 20; // concurrent tasks
+    let seed_urls = vec!["https://example.com"];
 
     let state = Arc::new(CrawlerState::new(requests_per_second));
 
@@ -212,29 +159,15 @@ async fn main() -> Result<()> {
     // fully processed.  When it reaches 0, crawling is done.
     let in_flight = Arc::new(AtomicUsize::new(0));
 
-
     //Seed the crawl queue.
-    for seed in seed_urls{
+    for seed in seed_urls {
         let url = Url::parse(&seed)?;
         state.visited.insert(url.to_string());
         link_tx.send(url).await?;
         in_flight.fetch_add(1, Ordering::SeqCst);
     }
 
-    // ----------------------------------------------------------
-    // STEP 4-C: Spawn worker tasks.
-    //
-    // Use `tokio::spawn` to launch `num_workers` async tasks.
-    // Each task gets a clone of:
-    //   • `state`      (Arc — cheap clone)
-    //   • `link_rx`    (Receiver — clone allowed by async-channel)
-    //   • `link_tx`    (Sender — clone allowed by async-channel)
-    //   • `in_flight`  (Arc — cheap clone)
-    //
-    // Collect the JoinHandles so we can await them later.
-    // ----------------------------------------------------------
-
-    // 👉 TODO (4-C): Spawn `num_workers` worker tasks.
+    // Spawn `num_workers` worker tasks.
     let mut handles = Vec::new();
     for _ in 0..num_workers {
         let state = Arc::clone(&state);
@@ -244,32 +177,11 @@ async fn main() -> Result<()> {
         handles.push(tokio::spawn(worker(state, link_rx, link_tx, in_flight)));
     }
 
-    // ----------------------------------------------------------
-    // STEP 4-D: Wait for crawling to finish.
-    //
-    // Drop the original `link_tx` here.  The workers hold their
-    // own clones; once they are all done AND `in_flight` hits 0,
-    // every sender will be dropped and `link_rx.recv()` will
-    // return `Err`, causing workers to exit.
-    //
-    // Then await all JoinHandles.
-    // ----------------------------------------------------------
-
-    // 👉 TODO (4-D): Drop link_tx and await all handles.
+    //Drop link_tx and await all handles.
     drop(link_tx);
-
     for handle in handles {
         handle.await.unwrap();
     }
-
-    println!(
-        "\nFinished crawling {} unique URLs",
-        state.visited.len()
-    );
-
+    println!("\nFinished crawling {} unique URLs", state.visited.len());
     Ok(())
 }
-
-// ============================================================
-//  BONUS CHALLENGES  (implement after the core lab is working)
-// ============================================================
