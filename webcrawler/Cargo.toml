@@ -17,3 +17,4 @@ anyhow = "1"
 select = "0.6.1"
 rand = "0.8.0"
 async-channel = "2.5.0"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros"] }
