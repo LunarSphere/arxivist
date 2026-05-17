@@ -119,16 +119,18 @@ async fn crawl_page(
     }
 
     //TODO: we've gotten a repsonse so tell the db
-    let _ = db_tx
-        .send(DbEvent::PageFetched {
-            url: item.url.to_string(),
-            http_status: response.status().as_u16(),
-            content_type: content_type.to_string(),
-        })
-        .await;
+    let db_future = db_tx.send(DbEvent::PageFetched {
+        url: item.url.to_string(),
+        http_status: response.status().as_u16(),
+        content_type: content_type.to_string(),
+    });
 
     // Await the body text.
-    let body: String = response.text().await?;
+    let body_future = response.text();
+
+    let (_db_result, body_result) = tokio::join!(db_future, body_future); //saves like 1/2 a second but i wanted to try it out :)
+    let body = body_result?;
+    let _ = _db_result;
 
     // Parse HTML and extract links.
     let (links, db_events) = {
