@@ -4,6 +4,7 @@ use dashmap::DashSet; // thread-safe set for tracking visited URLs **replaces ha
 use governor::{Quota, RateLimiter}; // rate limiting for HTTP requests
 use reqwest::Client; // HTTP client for making requests
 use scraper::{Html, Selector}; // HTML parsing and CSS selector matching
+use sha2::{Digest, Sha256};
 use std::num::NonZeroU32;
 use std::sync::{
     Arc,
@@ -108,30 +109,63 @@ async fn crawl_page(
         return Ok(());
     }
 
+    let http_status = response.status().as_u16();
     let content_type = response
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
 
     if !content_type.contains("text/html") {
         return Ok(());
     }
 
-    //TODO: we've gotten a repsonse so tell the db
-    let db_future = db_tx.send(DbEvent::PageFetched {
-        url: item.url.to_string(),
-        http_status: response.status().as_u16(),
-        content_type: content_type.to_string(),
-    });
-
     // Await the body text.
-    let body_future = response.text();
+    let body = response.text().await?;
 
-    let (_db_result, body_result) = tokio::join!(db_future, body_future); //saves like 1/2 a second but i wanted to try it out :)
-    let body = body_result?;
-    let _ = _db_result;
+    // Parse title from HTML.
+    let title: Option<String> = {
+        let document = Html::parse_document(&body);
+        let title_selector = Selector::parse("title").unwrap();
 
+        document
+            .select(&title_selector)
+            .next()
+            .map(|el| el.text().collect::<String>().trim().to_string())
+            .filter(|title| !title.is_empty())
+    };
+    let extracted_text: Option<String> = {
+        let document = Html::parse_document(&body);
+
+        let text = document
+            .root_element()
+            .text()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        Some(text).filter(|text| !text.is_empty())
+    };
+    let content_hash: String = hex::encode(Sha256::digest(body.as_bytes()));
+    let _ = db_tx
+        .send(DbEvent::PageFetched {
+            url: item.url.clone().to_string(),
+            http_status,
+            content_type,
+            title,
+        })
+        .await;
+    let _ = db_tx
+        .send(DbEvent::PageContentFound {
+            url: item.url.to_string(),
+            html: body.clone(),
+            extracted_text: extracted_text,
+            content_hash: Some(content_hash),
+        })
+        .await;
     // Parse HTML and extract links.
     let (links, db_events) = {
         let document = Html::parse_document(&body);
@@ -153,11 +187,13 @@ async fn crawl_page(
                         }
                         let key = absolute.to_string();
                         if state.visited.insert(key.clone()) {
+                            let anchor_text = element.text().collect::<String>().trim().to_string();
                             //TODO: tell the db the page was queued and the link was found
                             db_events.push(DbEvent::PageQueued { url: key.clone() });
                             db_events.push(DbEvent::LinkFound {
                                 from_url: item.url.to_string(),
                                 to_url: key.clone(),
+                                anchor_text: Some(anchor_text).filter(|text| !text.is_empty()),
                             });
                             let new_item = CrawlItem::new(absolute, item.crawl_depth + 1);
                             if state.visited.len() < state.max_pages {
