@@ -76,7 +76,7 @@ pub async fn setup_db() -> anyhow::Result<SqlitePool> {
         CREATE TABLE IF NOT EXISTS links (
             from_page_id INTEGER NOT NULL,
             to_page_id INTEGER NOT NULL,
-            anchor_text TEXT
+            anchor_text TEXT,
             discovered_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(from_page_id, to_page_id),
             FOREIGN KEY(from_page_id) REFERENCES pages(id),
@@ -167,6 +167,12 @@ pub enum DbEvent {
         html: String,
         extracted_text: Option<String>,
         content_hash: Option<String>,
+    },
+    AssetFound {
+        url: String,
+        asset_url: String,
+        asset_type: String,
+        alt_text: Option<String>,
     },
 }
 
@@ -273,6 +279,36 @@ pub async fn db_writer(
                 .bind(html)
                 .bind(extracted_text)
                 .bind(content_hash)
+                .execute(&pool)
+                .await?;
+            }
+            DbEvent::AssetFound {
+                url,
+                asset_url,
+                asset_type,
+                alt_text,
+            } => {
+                let page_id = get_or_create_page_id(&pool, &url).await?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO page_assets(
+                        page_id,
+                        asset_url,
+                        asset_type,
+                        alt_text
+                    )
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(page_id, asset_url) DO UPDATE SET
+                        asset_url = excluded.asset_url,
+                        asset_type = excluded.asset_type,
+                        alt_text = excluded.alt_text,
+                        discovered_at = datetime('now');
+                    "#,
+                )
+                .bind(page_id)
+                .bind(asset_url)
+                .bind(asset_type)
+                .bind(alt_text)
                 .execute(&pool)
                 .await?;
             }

@@ -170,10 +170,12 @@ async fn crawl_page(
     let (links, db_events) = {
         let document = Html::parse_document(&body);
         // Build the CSS selector for anchor tags
-        let selector = Selector::parse("a[href]").unwrap();
+        let selector = Selector::parse("a[href]").unwrap(); //originial link selector
 
         let mut links = Vec::new();
         let mut db_events = Vec::new();
+
+        //populate links channel and send events to our sql database
         for element in document.select(&selector) {
             if state.visited.len() >= state.max_pages {
                 break;
@@ -201,6 +203,49 @@ async fn crawl_page(
                             }
                         }
                     }
+                }
+            }
+        }
+        //We're gonna start finding assets starting with the Images
+        let img_selector = Selector::parse("img[src]").unwrap();
+        for element in document.select(&img_selector) {
+            if let Some(src) = element.value().attr("src") {
+                if let Ok(asset_url) = item.url.join(src) {
+                    let alt_text = element.value().attr("alt").map(|s| s.trim().to_string());
+                    db_events.push(DbEvent::AssetFound {
+                        url: item.url.to_string(),
+                        asset_url: asset_url.to_string(),
+                        asset_type: "image".to_string(),
+                        alt_text,
+                    });
+                }
+            }
+        }
+        //next we do scripts
+        let script_selector = Selector::parse("script[src]").unwrap();
+        for element in document.select(&script_selector) {
+            if let Some(src) = element.value().attr("src") {
+                if let Ok(asset_url) = item.url.join(src) {
+                    db_events.push(DbEvent::AssetFound {
+                        url: item.url.to_string(),
+                        asset_url: asset_url.to_string(),
+                        asset_type: "script".to_string(),
+                        alt_text: None,
+                    });
+                }
+            }
+        }
+        //finally css sheets
+        let css_selector = Selector::parse(r#"link[rel="stylesheet"]"#).unwrap();
+        for element in document.select(&css_selector) {
+            if let Some(src) = element.value().attr("src") {
+                if let Ok(asset_url) = item.url.join(src) {
+                    db_events.push(DbEvent::AssetFound {
+                        url: item.url.to_string(),
+                        asset_url: asset_url.to_string(),
+                        asset_type: "stylesheet".to_string(),
+                        alt_text: None,
+                    });
                 }
             }
         }
