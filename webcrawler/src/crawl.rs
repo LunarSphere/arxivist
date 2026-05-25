@@ -14,7 +14,7 @@ use std::time::Duration;
 use tracing::info;
 use url::Url; // URL parsing
 
-use crate::arxiv_scrape::DbEvent;
+use crate::handle_db::DbEvent;
 
 pub struct CrawlItem {
     url: Url,
@@ -44,7 +44,7 @@ impl CrawlerState {
     /// allowed to make every second across ALL tasks combined.
     pub fn new(requests_per_second: u32, max_pages: usize, depth_limit: usize) -> Self {
         let client = Client::builder()
-            .user_agent("Archivist/toySearchengine-1.0")
+            .user_agent("ToySearchCrawler/0.1 (mailto:jjtribb@clemson.edu) reqwest")
             .timeout(Duration::from_secs(10))
             .build()
             .expect("failed to build HTTP client");

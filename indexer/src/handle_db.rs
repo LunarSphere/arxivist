@@ -9,6 +9,129 @@ pub struct PageToIndex {
     pub extracted_text: String,
 }
 
+/*
+This function will populate a page_rank table with
+ranked pages
+ALGORITHIM
+1. start with a set of pages
+2. crawl the web to determine link structure (links table)
+3. assign each page an initial rank of 1/N w/ N = total_number of pages
+4. UPDATE: for each current_page. SUM(attatched_page rank/ # links from attatched page)
+*/
+pub async fn page_rank(pool: &SqlitePool, damp: f64) -> Result<()> {
+    // create a table to represent the page ranks
+    sqlx::query(
+        r#"
+            CREATE TABLE IF NOT EXISTS page_rank (
+                page_id INTEGER PRIMARY KEY,
+                rank REAL NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY(page_id) REFERENCES pages(id)
+            );
+            "#,
+    )
+    .execute(pool)
+    .await?;
+
+    //fiil in vars for the page rank algorithim
+    let total_pages: i64 = sqlx::query_scalar(
+        r#"
+            SELECT COUNT(*)
+            FROM pages;
+            "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    if total_pages == 0 {
+        return Ok(());
+    }
+
+    // get the page ids
+    let page_ids: Vec<i64> = sqlx::query_scalar(
+        r#"
+            SELECT id
+            FROM pages;
+            "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // backlinks : to_page_id -> Vec<from_page_id>
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        r#"
+            SELECT to_page_id, from_page_id
+            FROM links;
+            "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let init_rank: f64 = 1.0 / (total_pages as f64);
+    let mut back_links: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut out_link_counts: HashMap<i64, usize> = HashMap::new();
+
+    for (to_page_id, from_page_id) in rows {
+        back_links // tracks which pages link to this page
+            .entry(to_page_id)
+            .or_insert_with(Vec::new)
+            .push(from_page_id);
+
+        *out_link_counts.entry(from_page_id).or_insert(0) += 1; // tracks how many pages this page links to
+    }
+
+    let mut page_ranks: HashMap<i64, f64> = HashMap::new();
+
+    for page_id in &page_ids {
+        page_ranks.insert(*page_id, init_rank);
+    }
+
+    for _ in 0..20 {
+        let mut next_page_ranks: HashMap<i64, f64> = HashMap::new();
+
+        for page_id in &page_ids {
+            let mut score = 0.0;
+
+            if let Some(values) = back_links.get(page_id) {
+                for val in values {
+                    let rank = page_ranks.get(val).copied().unwrap_or(0.0);
+                    let out_count = out_link_counts.get(val).copied().unwrap_or(1);
+
+                    score += rank / out_count as f64;
+                }
+            }
+
+            next_page_ranks.insert(*page_id, (1.0 - damp) / total_pages as f64 + (damp * score));
+        }
+
+        page_ranks = next_page_ranks;
+    }
+
+    let mut tx = pool.begin().await?;
+
+    for (page_id, rank) in page_ranks {
+        sqlx::query(
+            r#"
+            INSERT INTO page_rank (
+                page_id,
+                rank,
+                updated_at
+            )
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(page_id) DO UPDATE SET
+                rank = excluded.rank,
+                updated_at = datetime('now');
+            "#,
+        )
+        .bind(page_id)
+        .bind(rank)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn load_pages_to_index(pool: &SqlitePool) -> Result<Vec<PageToIndex>> {
     let pages = sqlx::query_as::<_, PageToIndex>(
         r#"

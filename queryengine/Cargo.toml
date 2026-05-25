@@ -1,0 +1,11 @@
+[package]
+name = "queryengine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+clap = "4.6.1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+stop-words = "0.10.0"

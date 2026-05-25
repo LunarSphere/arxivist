@@ -7,6 +7,8 @@ use handle_db::*;
 // we can index 5000 pages in 6 minutes
 #[tokio::main]
 async fn main() -> Result<()> {
+    const DAMP: f64 = 0.85;
+
     tracing_subscriber::fmt::init();
 
     info!("starting indexer");
@@ -66,6 +68,9 @@ async fn main() -> Result<()> {
 
     db_task.await??;
     info!("db writer finished");
+
+    page_rank(&pool, DAMP).await?;
+    info!("page rank finished");
 
     pool.close().await;
     info!("database pool closed");

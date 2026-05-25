@@ -7,22 +7,26 @@ use std::sync::{
 use std::time::Duration;
 use url::Url; // URL parsing
 
-mod arxiv_scrape;
 mod crawl;
-use arxiv_scrape::*;
+mod handle_db;
 use crawl::*;
+use handle_db::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // logging
     tracing_subscriber::fmt::init();
 
-    //configuration
-    let requests_per_second: u32 = 10; // stay polite
-    let num_workers: usize = 20; // concurrent tasks
-    let max_pages: usize = 1000;
-    let depth_limit: usize = 3;
-    let seed_urls = vec!["https://example.com"];
+    //configuration 5000 urls in 12 minutes
+    let requests_per_second: u32 = 7; // stay polite
+    let num_workers: usize = 6; // concurrent tasks
+    let max_pages: usize = 5000;
+    let depth_limit: usize = 6;
+    let seed_urls = vec![
+        "https://books.toscrape.com/",
+        "https://quotes.toscrape.com/",
+        "https://www.scrapethissite.com/pages/ajax-javascript/",
+    ];
 
     let state = Arc::new(CrawlerState::new(
         requests_per_second,
