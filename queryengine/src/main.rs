@@ -36,16 +36,6 @@ struct PostingMatch {
     rank: f64,
 }
 
-// #[derive(Debug)]
-// AccumulatedResult (page_id, url, title, extracted_text, score)
-// struct AccumulatedResult {
-//     page_id: i64,
-//     url: String,
-//     title: Option<String>,
-//     extracted_text: String,
-//     score: String,
-// }
-
 // search_pages
 pub fn search_db(pool: &Connection, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
     // normalize the query

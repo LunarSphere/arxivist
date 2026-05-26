@@ -4,3 +4,4 @@ webcrawler/target/
 queryengine/target/
 data/crawler.db-shm
 data/crawler.db-wal
+tui/target/

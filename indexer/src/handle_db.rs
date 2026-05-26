@@ -85,10 +85,10 @@ pub async fn page_rank(pool: &SqlitePool, damp: f64) -> Result<()> {
     for page_id in &page_ids {
         page_ranks.insert(*page_id, init_rank);
     }
-
+    //loop a couple times for accuracy
     for _ in 0..20 {
         let mut next_page_ranks: HashMap<i64, f64> = HashMap::new();
-
+        //page_rank calculation
         for page_id in &page_ids {
             let mut score = 0.0;
 
@@ -108,8 +108,9 @@ pub async fn page_rank(pool: &SqlitePool, damp: f64) -> Result<()> {
     }
 
     let mut tx = pool.begin().await?;
-
+    //populate page_rank table
     for (page_id, rank) in page_ranks {
+        let scaled_rank = rank * total_pages as f64;
         sqlx::query(
             r#"
             INSERT INTO page_rank (
@@ -124,7 +125,7 @@ pub async fn page_rank(pool: &SqlitePool, damp: f64) -> Result<()> {
             "#,
         )
         .bind(page_id)
-        .bind(rank)
+        .bind(scaled_rank)
         .execute(&mut *tx)
         .await?;
     }
