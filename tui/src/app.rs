@@ -1,3 +1,8 @@
+//define enums and structs to represent what the user is currently interacting with
+//basic logic related to the enums or structs
+
+use std::collections::HashSet;
+
 //what the user is currently viewing
 pub enum CurrentScreen {
     Main,
@@ -13,9 +18,11 @@ pub enum CurrentlyEditing {
 //track the full application state
 // tracsk data being passed around
 pub struct App {
-    pub query_input: String,                         // the current query.
+    pub query_input: String, // the current query.
+    pub search_history: HashSet<String>,
+    pub search_results: HashSet<String>,
     pub current_screen: CurrentScreen, // the current screen the user is looking at, and will later determine what is rendered.
-    pub currently_editing: Option<CurrentlyEditing>, // the optional state containing which of the key or value pair the user is editing. It is an option, because when the user is not directly editing a key-value pair, this will be set to `None`.
+    pub currently_editing: Option<CurrentlyEditing>, // what box are we editing
 }
 //
 impl App {
@@ -24,12 +31,13 @@ impl App {
         App {
             query_input: String::new(),
             search_history: HashSet::new(),
+            search_results: HashSet::new(),
             current_screen: CurrentScreen::Main,
             currently_editing: None,
         }
     }
     pub fn record_search(&mut self) {
-        self.search_history.insert(self.query_input.clone);
+        self.search_history.insert(self.query_input.clone());
         self.query_input = String::new();
         self.currently_editing = None;
     }
