@@ -3,11 +3,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::app::{App, CurrentScreen, CurrentlyEditing};
-
+// TODO: Figure out how to let users scroll through results
 pub fn ui(frame: &mut Frame, app: &App) {
     // Create the layout sections.
     let chunks = Layout::default()
@@ -31,18 +31,20 @@ pub fn ui(frame: &mut Frame, app: &App) {
 
     frame.render_widget(title, chunks[0]); //so this is how we choose the block to place a widget in
     //c1 BEGIN: I shouuld probably make this the search results
-    let mut list_items = Vec::<ListItem>::new();
+    let results_text = app.search_results.join("\n");
 
-    for item in app.search_results.iter() {
-        list_items.push(ListItem::new(Line::from(Span::styled(
-            format!("{}", item),
-            Style::default().fg(Color::Yellow),
-        ))));
-    }
+    let results = Paragraph::new(Text::styled(
+        results_text,
+        Style::default().fg(Color::Yellow),
+    ))
+    .block(
+        Block::default()
+            .title("Search Results")
+            .borders(Borders::ALL),
+    )
+    .wrap(Wrap { trim: false });
 
-    let list = List::new(list_items);
-
-    frame.render_widget(list, chunks[1]);
+    frame.render_widget(results, chunks[1]);
     //c1 END
     //Navigation Hints not too much to change here. maybe get ridd of toggle?
     let current_navigation_text = vec![

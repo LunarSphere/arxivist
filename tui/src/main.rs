@@ -121,8 +121,17 @@ where
                             if let Some(editing) = &app.currently_editing {
                                 match editing {
                                     CurrentlyEditing::Query => {
+                                        if let Err(err) =
+                                            app.get_search_results(app.query_input.clone())
+                                        {
+                                            app.search_results.clear();
+                                            app.search_results.push(format!("Search error: {err}"));
+                                        }
+
                                         app.record_search();
+
                                         app.current_screen = CurrentScreen::Main;
+                                        app.currently_editing = None;
                                     }
                                 }
                             }
