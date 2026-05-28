@@ -9,27 +9,28 @@
  *
  */
 use anyhow::{Result, bail};
-use clap::{Arg, Command};
 use rusqlite::{Connection, ToSql};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
 // structs
+//
+// TODO: add a to_string function as am impl for thsi struct
 pub struct SearchResult {
-    url: String,
-    title: Option<String>,
-    snippet: Option<String>,
-    score: f64,
+    pub url: String,
+    pub title: Option<String>,
+    pub snippet: Option<String>,
+    pub score: f64,
 }
 
-struct PostingMatch {
-    page_id: i64,
-    url: String,
-    title: Option<String>,
-    term_frequency: i64,
-    word_count: i64,
-    doc_frequency: i64,
-    rank: f64,
+pub struct PostingMatch {
+    pub page_id: i64,
+    pub url: String,
+    pub title: Option<String>,
+    pub term_frequency: i64,
+    pub word_count: i64,
+    pub doc_frequency: i64,
+    pub rank: f64,
 }
 
 // search the database for top k urls
@@ -142,7 +143,7 @@ pub fn search_db(pool: &Connection, query: &str, top_k: usize) -> Result<Vec<Sea
 //
 // within your query function youll handel page rank and tfidf
 // TODO add a helper for making snippets
-fn remove_stop_words(query: &str) -> Vec<String> {
+pub fn remove_stop_words(query: &str) -> Vec<String> {
     let stop_words = stop_words::get(stop_words::LANGUAGE::English);
 
     query
@@ -153,59 +154,10 @@ fn remove_stop_words(query: &str) -> Vec<String> {
         .collect()
 }
 
-fn normalize_token(token: &str) -> String {
+pub fn normalize_token(token: &str) -> String {
     token
         .chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(|c| c.to_lowercase())
         .collect()
-}
-
-fn main() -> Result<()> {
-    // take search query as command line args and normalize it
-    let matches = Command::new("Query Engine")
-        .version("0.1.0")
-        .about("Search Indexed Pages")
-        .arg(
-            Arg::new("query")
-                .short('q')
-                .long("query")
-                .help("the word or phrase you want to search for")
-                .value_parser(clap::builder::NonEmptyStringValueParser::new()),
-        )
-        .get_matches();
-
-    let default_query = "Formula 1 Movie";
-    let query = matches
-        .get_one::<String>("query")
-        .map(|s| s.as_str())
-        .unwrap_or(default_query);
-
-    // connect to db
-    let pool = Connection::open("../data/crawler.db")?;
-
-    // search for pages (db, query, k-ranks)
-    let results = search_db(&pool, query, 10)?;
-
-    if results.is_empty() {
-        println!("no results found for: {query}");
-    }
-
-    for (index, result) in results.iter().enumerate() {
-        println!(
-            "{}. {}",
-            index + 1,
-            result.title.as_deref().unwrap_or("Untitled")
-        );
-        println!("   URL: {}", result.url);
-        println!("   Score: {:.6}", result.score);
-
-        if let Some(snippet) = &result.snippet {
-            println!("   {}", snippet);
-        }
-
-        println!();
-    }
-
-    Ok(())
 }
