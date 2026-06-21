@@ -74,12 +74,12 @@ impl Drop for InFlightGuard {
     }
 }
 
-// Async function
+// Async function:
 //    1. Waits for a rate-limit token.
 //    2. Sends an HTTP GET request and awaits the response.
 //    3. Checks the status code and Content-Type.
-//    4. Parses the HTML and extracts every <a href="…"> link.
-//    5. Sends newly-discovered absolute URLs down `link_tx`.
+//    4. Parses the HTML and extracts links and asset references.
+//    5. Sends newly discovered URLs down `link_tx` and DB events down `db_tx`.
 
 async fn crawl_page(
     state: Arc<CrawlerState>,
@@ -169,13 +169,13 @@ async fn crawl_page(
     // Parse HTML and extract links.
     let (links, db_events) = {
         let document = Html::parse_document(&body);
-        // Build the CSS selector for anchor tags
-        let selector = Selector::parse("a[href]").unwrap(); //originial link selector
+        // Build the CSS selector for anchor tags.
+        let selector = Selector::parse("a[href]").unwrap();
 
         let mut links = Vec::new();
         let mut db_events = Vec::new();
 
-        //populate links channel and send events to our sql database
+        // Populate the crawl queue and emit database events for discovered links.
         for element in document.select(&selector) {
             if state.visited.len() >= state.max_pages {
                 break;
@@ -206,7 +206,7 @@ async fn crawl_page(
                 }
             }
         }
-        //We're gonna start finding assets starting with the Images
+        // Record image assets.
         let img_selector = Selector::parse("img[src]").unwrap();
         for element in document.select(&img_selector) {
             if let Some(src) = element.value().attr("src") {
@@ -221,7 +221,7 @@ async fn crawl_page(
                 }
             }
         }
-        //next we do scripts
+        // Record script assets.
         let script_selector = Selector::parse("script[src]").unwrap();
         for element in document.select(&script_selector) {
             if let Some(src) = element.value().attr("src") {
@@ -235,11 +235,11 @@ async fn crawl_page(
                 }
             }
         }
-        //finally css sheets
+        // Record stylesheet assets.
         let css_selector = Selector::parse(r#"link[rel="stylesheet"]"#).unwrap();
         for element in document.select(&css_selector) {
-            if let Some(src) = element.value().attr("src") {
-                if let Ok(asset_url) = item.url.join(src) {
+            if let Some(href) = element.value().attr("href") {
+                if let Ok(asset_url) = item.url.join(href) {
                     db_events.push(DbEvent::AssetFound {
                         url: item.url.to_string(),
                         asset_url: asset_url.to_string(),
@@ -251,7 +251,7 @@ async fn crawl_page(
         }
         (links, db_events)
     };
-    //if messing with async and handling data you need an await or else data can be skipped.
+    // Await each DB send so events are actually flushed before the task exits.
     for event in db_events {
         let _ = db_tx.send(event).await;
     }
@@ -293,4 +293,4 @@ pub async fn worker(
     }
 }
 
-// you cannot call an .await during an HTLM parsing loop. it is not thread safe.
+// Avoid awaiting inside the DOM traversal loop so parsing stays local and fast.

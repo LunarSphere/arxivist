@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
     // logging
     tracing_subscriber::fmt::init();
 
-    //configuration 5000 urls in 12 minutes
+    // Crawl tuning for the local demo corpus.
     let requests_per_second: u32 = 7; // stay polite
     let num_workers: usize = 6; // concurrent tasks
     let max_pages: usize = 5000;
@@ -34,8 +34,7 @@ async fn main() -> Result<()> {
         depth_limit,
     ));
 
-    //Create a bounded async-channel with a capacity of 10_000 URLs.
-    //let (link_tx, link_rx) = async_channel::bounded(10_000);
+    // Create a bounded async-channel with a capacity of 10,000 crawl items.
     let (link_tx, link_rx): (Sender<CrawlItem>, Receiver<CrawlItem>) =
         async_channel::bounded(10000);
     let (db_tx, db_rx) = async_channel::bounded::<DbEvent>(10000);
@@ -80,7 +79,7 @@ async fn main() -> Result<()> {
         )));
     }
 
-    //Drop link_tx and await all handles.
+    // Wait for all scheduled work to drain, then stop the workers and writer.
     loop {
         if in_flight.load(Ordering::SeqCst) == 0 {
             break;

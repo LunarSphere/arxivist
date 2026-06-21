@@ -1,0 +1,12 @@
+# Rust build outputs
+target/
+**/target/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Legacy generated crawl data
+Legacy/data/
+AGENTS.md
