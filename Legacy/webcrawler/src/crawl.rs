@@ -1,6 +1,6 @@
 use anyhow::Result; // failures will be returned alongside the result
 use async_channel::{Receiver, Sender}; // allows concurrent communication between tasks
-use dashmap::DashSet; // thread-safe set for tracking visited URLs **replaces hashset**
+use dashmap::DashSet; // thread-safe set for tracking visited URLs
 use governor::{Quota, RateLimiter}; // rate limiting for HTTP requests
 use reqwest::Client; // HTTP client for making requests
 use scraper::{Html, Selector}; // HTML parsing and CSS selector matching
@@ -28,9 +28,9 @@ impl CrawlItem {
     }
 }
 
-//  CrawlerState holds everything that must be shared across
-//  all concurrent crawl tasks.  It is wrapped in an `Arc` so
-//  it can be cloned cheaply and sent to many tasks.
+// CrawlerState holds everything that must be shared across
+// concurrent crawl tasks. Callers wrap it in an `Arc` so it can
+// be cloned cheaply and shared with many tasks.
 pub struct CrawlerState {
     pub client: Client,
     pub visited: DashSet<String>,
@@ -95,10 +95,10 @@ async fn crawl_page(
     // Send the GET request and await the response.
     let response = state.client.get(item.url.clone()).send().await?;
 
-    //check for failed urls and non text/html
+    // Skip failed responses and non-HTML content.
     if !response.status().is_success() {
         tracing::warn!(item.url = %item.url, status = %response.status(), "non-success status, skipping");
-        //tell database the url failed
+        // Tell the database that the URL failed.
         let _ = db_tx
             .send(DbEvent::PageFailed {
                 url: item.url.to_string(),
@@ -190,7 +190,7 @@ async fn crawl_page(
                         let key = absolute.to_string();
                         if state.visited.insert(key.clone()) {
                             let anchor_text = element.text().collect::<String>().trim().to_string();
-                            //TODO: tell the db the page was queued and the link was found
+                            // Record the queued page and discovered link in the DB.
                             db_events.push(DbEvent::PageQueued { url: key.clone() });
                             db_events.push(DbEvent::LinkFound {
                                 from_url: item.url.to_string(),
@@ -251,7 +251,7 @@ async fn crawl_page(
         }
         (links, db_events)
     };
-    // Await each DB send so events are actually flushed before the task exits.
+    // Await each DB send so events are enqueued before the task exits.
     for event in db_events {
         let _ = db_tx.send(event).await;
     }
@@ -267,9 +267,9 @@ async fn crawl_page(
     Ok(())
 }
 
-//  Each worker loops forever, receiving URLs from the shared
-//  channel and calling `crawl_page` on each one.
-// The loop exits when the channel is closed (all senders have been dropped)
+// Each worker receives URLs from the shared channel and calls
+// `crawl_page` on each one. The loop exits when the channel is
+// closed and all senders have been dropped.
 
 pub async fn worker(
     state: Arc<CrawlerState>,
@@ -292,5 +292,3 @@ pub async fn worker(
         });
     }
 }
-
-// Avoid awaiting inside the DOM traversal loop so parsing stays local and fast.
