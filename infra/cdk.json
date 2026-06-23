@@ -1,0 +1,11 @@
+{
+  "app": "npx ts-node --prefer-ts-exts bin/arxivist-infra.ts",
+  "context": {
+    "projectName": "arxivist",
+    "demoCorsOrigin": "*",
+    "budgetEmail": "",
+    "monthlyBudgetUsd": 90,
+    "searchDesiredCount": 0,
+    "crawlerMaxCapacity": 4
+  }
+}

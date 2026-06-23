@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Arxivist Search</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script defer src="/config.js"></script>
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="search-panel" aria-labelledby="page-title">
+        <div class="masthead">
+          <p class="eyebrow">Arxivist</p>
+          <h1 id="page-title">Search the demo crawl</h1>
+          <p id="index-status" class="status">Checking index...</p>
+        </div>
+
+        <form id="search-form" class="search-form">
+          <label class="visually-hidden" for="query">Search query</label>
+          <input id="query" name="query" type="search" placeholder="book mystery" autocomplete="off" required />
+          <button type="submit">Search</button>
+        </form>
+
+        <p id="message" class="message" role="status"></p>
+      </section>
+
+      <section class="results-shell" aria-label="Search results">
+        <ol id="results" class="results"></ol>
+      </section>
+    </main>
+  </body>
+</html>

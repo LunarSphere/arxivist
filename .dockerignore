@@ -1,0 +1,8 @@
+target/
+data/
+Legacy/
+infra/node_modules/
+infra/cdk.out/
+frontend/node_modules/
+frontend/dist/
+.git/

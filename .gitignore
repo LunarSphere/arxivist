@@ -1,0 +1,7 @@
+/target/
+/data/
+/.env
+node_modules/
+cdk.out/
+dist/
+.vercel/

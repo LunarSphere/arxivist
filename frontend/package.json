@@ -1,0 +1,11 @@
+{
+  "name": "arxivist-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build-config.mjs",
+    "dev": "node build-config.mjs && npx serve dist",
+    "vercel-build": "node build-config.mjs"
+  }
+}

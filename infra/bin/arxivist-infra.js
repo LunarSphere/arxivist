@@ -1,0 +1,15 @@
+#!/usr/bin/env node
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const cdk = require("aws-cdk-lib");
+const arxivist_demo_stack_1 = require("../lib/arxivist-demo-stack");
+const app = new cdk.App();
+const projectName = app.node.tryGetContext("projectName") ?? "arxivist";
+new arxivist_demo_stack_1.ArxivistDemoStack(app, "ArxivistDemoStack", {
+    projectName,
+    env: {
+        account: process.env.CDK_DEFAULT_ACCOUNT,
+        region: process.env.CDK_DEFAULT_REGION ?? "us-east-1"
+    }
+});
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJmaWxlIjoiYXJ4aXZpc3QtaW5mcmEuanMiLCJzb3VyY2VSb290IjoiIiwic291cmNlcyI6WyJhcnhpdmlzdC1pbmZyYS50cyJdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiOzs7QUFDQSxtQ0FBbUM7QUFDbkMsb0VBQStEO0FBRS9ELE1BQU0sR0FBRyxHQUFHLElBQUksR0FBRyxDQUFDLEdBQUcsRUFBRSxDQUFDO0FBQzFCLE1BQU0sV0FBVyxHQUFHLEdBQUcsQ0FBQyxJQUFJLENBQUMsYUFBYSxDQUFDLGFBQWEsQ0FBQyxJQUFJLFVBQVUsQ0FBQztBQUV4RSxJQUFJLHVDQUFpQixDQUFDLEdBQUcsRUFBRSxtQkFBbUIsRUFBRTtJQUM5QyxXQUFXO0lBQ1gsR0FBRyxFQUFFO1FBQ0gsT0FBTyxFQUFFLE9BQU8sQ0FBQyxHQUFHLENBQUMsbUJBQW1CO1FBQ3hDLE1BQU0sRUFBRSxPQUFPLENBQUMsR0FBRyxDQUFDLGtCQUFrQixJQUFJLFdBQVc7S0FDdEQ7Q0FDRixDQUFDLENBQUMiLCJzb3VyY2VzQ29udGVudCI6WyIjIS91c3IvYmluL2VudiBub2RlXG5pbXBvcnQgKiBhcyBjZGsgZnJvbSBcImF3cy1jZGstbGliXCI7XG5pbXBvcnQgeyBBcnhpdmlzdERlbW9TdGFjayB9IGZyb20gXCIuLi9saWIvYXJ4aXZpc3QtZGVtby1zdGFja1wiO1xuXG5jb25zdCBhcHAgPSBuZXcgY2RrLkFwcCgpO1xuY29uc3QgcHJvamVjdE5hbWUgPSBhcHAubm9kZS50cnlHZXRDb250ZXh0KFwicHJvamVjdE5hbWVcIikgPz8gXCJhcnhpdmlzdFwiO1xuXG5uZXcgQXJ4aXZpc3REZW1vU3RhY2soYXBwLCBcIkFyeGl2aXN0RGVtb1N0YWNrXCIsIHtcbiAgcHJvamVjdE5hbWUsXG4gIGVudjoge1xuICAgIGFjY291bnQ6IHByb2Nlc3MuZW52LkNES19ERUZBVUxUX0FDQ09VTlQsXG4gICAgcmVnaW9uOiBwcm9jZXNzLmVudi5DREtfREVGQVVMVF9SRUdJT04gPz8gXCJ1cy1lYXN0LTFcIlxuICB9XG59KTtcbiJdfQ==
