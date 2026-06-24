@@ -9,18 +9,25 @@
     <script defer src="/app.js"></script>
   </head>
   <body>
+    <nav class="top-links" aria-label="Site links">
+      <a href="https://arxiv.org/" rel="noreferrer">arXiv</a>
+      <a href="https://books.toscrape.com/" rel="noreferrer">Demo Crawl</a>
+      <a href="https://catppuccin.com/" rel="noreferrer">Mocha</a>
+    </nav>
+
     <main class="shell">
       <section class="search-panel" aria-labelledby="page-title">
         <div class="masthead">
-          <p class="eyebrow">Arxivist</p>
-          <h1 id="page-title">Search the demo crawl</h1>
+          <h1 id="page-title" class="logo" aria-label="Arxivist">
+            <span>A</span><span>r</span><span>x</span><span>i</span><span>v</span><span>i</span><span>s</span><span>t</span>
+          </h1>
           <p id="index-status" class="status">Checking index...</p>
         </div>
 
         <form id="search-form" class="search-form">
           <label class="visually-hidden" for="query">Search query</label>
           <input id="query" name="query" type="search" placeholder="book mystery" autocomplete="off" required />
-          <button type="submit">Search</button>
+          <button type="submit">Arxivist Search</button>
         </form>
 
         <p id="message" class="message" role="status"></p>

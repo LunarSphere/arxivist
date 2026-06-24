@@ -1,5 +1,6 @@
 const config = window.ARXIVIST_CONFIG ?? {};
-const apiBaseUrl = (config.apiBaseUrl ?? "").replace(/\/$/, "");
+const configuredApiBaseUrl = (config.apiBaseUrl ?? "").trim();
+const apiBaseUrl = (configuredApiBaseUrl || "http://127.0.0.1:3000").replace(/\/$/, "");
 
 const form = document.querySelector("#search-form");
 const queryInput = document.querySelector("#query");
@@ -7,6 +8,9 @@ const message = document.querySelector("#message");
 const indexStatus = document.querySelector("#index-status");
 const results = document.querySelector("#results");
 const submitButton = form.querySelector("button");
+const shell = document.querySelector(".shell");
+
+let hasSearched = false;
 
 function setMessage(text, tone = "default") {
   message.textContent = text;
@@ -14,9 +18,6 @@ function setMessage(text, tone = "default") {
 }
 
 function apiUrl(path) {
-  if (!apiBaseUrl) {
-    throw new Error("Missing ARXIVIST_API_BASE_URL");
-  }
   return `${apiBaseUrl}${path}`;
 }
 
@@ -29,7 +30,7 @@ async function loadHealth() {
     const health = await response.json();
     indexStatus.textContent = `${health.documents.toLocaleString()} pages indexed across ${health.terms.toLocaleString()} terms`;
   } catch (error) {
-    indexStatus.textContent = apiBaseUrl ? "Index status unavailable" : "Set ARXIVIST_API_BASE_URL in Vercel";
+    indexStatus.textContent = `Index status unavailable at ${apiBaseUrl}`;
   }
 }
 
@@ -71,6 +72,10 @@ form.addEventListener("submit", async (event) => {
   }
 
   submitButton.disabled = true;
+  if (!hasSearched) {
+    shell.classList.add("has-results");
+    hasSearched = true;
+  }
   setMessage("Searching...");
   results.replaceChildren();
 
@@ -87,7 +92,11 @@ form.addEventListener("submit", async (event) => {
 
     const payload = await response.json();
     renderResults(payload.results);
-    setMessage(payload.results.length === 0 ? "No results found." : `${payload.results.length} results`);
+    setMessage(
+      payload.results.length === 0
+        ? "No results found."
+        : `About ${payload.results.length.toLocaleString()} results`
+    );
   } catch (error) {
     setMessage(error.message, "error");
   } finally {
