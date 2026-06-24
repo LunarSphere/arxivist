@@ -1,3 +1,5 @@
+//idexing bassically computes info about the page such as whats linking to it, how many terms it has, the freuqncy of tokens, save the rank of the page.
+
 use arxivist_core::{
     CrawlOutcome, CrawlRecord, IndexedDocument, SearchIndex, TermStats, term_frequencies, tokenize,
 };

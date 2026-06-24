@@ -1,3 +1,4 @@
+// record page content fills out appropriate structs
 use crate::{
     args::Args,
     extract,
@@ -17,6 +18,19 @@ use tracing::warn;
 use url::Url;
 
 pub fn from_snapshot(args: &Args, item: &QueueItem, snapshot: PageSnapshot) -> CrawlRecord {
+    let content_path = format!("content/{}.html", content_hash(&snapshot.html));
+    if let Err(error) = fs::write(args.output_dir.join(&content_path), &snapshot.html) {
+        warn!(path = %content_path, ?error, "failed to write page content");
+    }
+
+    from_snapshot_with_content_path(item, snapshot, Some(content_path))
+}
+
+pub fn from_snapshot_with_content_path(
+    item: &QueueItem,
+    snapshot: PageSnapshot,
+    content_path: Option<String>,
+) -> CrawlRecord {
     let document = Html::parse_document(&snapshot.html);
     let title = extract::title(&document);
     let extracted_text = extract::text(&document);
@@ -54,10 +68,6 @@ pub fn from_snapshot(args: &Args, item: &QueueItem, snapshot: PageSnapshot) -> C
     }
 
     let hash = content_hash(&snapshot.html);
-    let content_path = format!("content/{hash}.html");
-    if let Err(error) = fs::write(args.output_dir.join(&content_path), &snapshot.html) {
-        warn!(path = %content_path, ?error, "failed to write page content");
-    }
 
     CrawlRecord {
         schema_version: 2,
@@ -73,7 +83,7 @@ pub fn from_snapshot(args: &Args, item: &QueueItem, snapshot: PageSnapshot) -> C
         content_type: snapshot.content_type,
         content_length,
         content_hash: Some(hash),
-        content_path: Some(content_path),
+        content_path,
         extracted_text,
         links,
         fetched_at_ms: now_ms(),
@@ -151,4 +161,8 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+pub fn storage_content_path(hash: &str) -> String {
+    format!("crawl/content/{hash}.html")
 }

@@ -1,11 +1,18 @@
+// define structs, enums, and functions reused in other crates
+// an Enum represents a value that is one of servral possible variants
+// TLDR structs: CrawlRecord, search document, indexed document, term stats, ranked result
+// TLDR enums: Crawl Outocome, Crawl Skip Reason
+// TLDR fn: content_hash, tokeninze, normaize_token, term_frequencies, bm25, tfidf, snippet
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use url::Url;
 
+// Define structs and Enumns
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrawlRecord {
     #[serde(default = "crawl_schema_version")]
+    // sets a default if the field is missing. | neato mosquito
     pub schema_version: u8,
     pub requested_url: Url,
     pub final_url: Option<Url>,
@@ -44,10 +51,6 @@ pub enum CrawlSkipReason {
     LikelyJavascriptRequired,
     FetchError,
     BadHostThreshold,
-}
-
-fn crawl_schema_version() -> u8 {
-    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,11 +96,20 @@ pub struct RankedResult {
     pub page_rank: f64,
 }
 
+//private function
+// private function to use with Crawl_record when crawl schema isnt specified.
+fn crawl_schema_version() -> u8 {
+    2
+}
+
+//PUBLIC FUNCTIONS
+// creates a SHA256 hash based on the html body information
 pub fn content_hash(body: &str) -> String {
     let digest = Sha256::digest(body.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+//splits string into a vector of strings
 pub fn tokenize(input: &str) -> Vec<String> {
     input
         .split_whitespace()
@@ -107,6 +119,7 @@ pub fn tokenize(input: &str) -> Vec<String> {
         .collect()
 }
 
+// makes strings lowercase and drops non alphanumeric characters
 pub fn normalize_token(token: &str) -> String {
     token
         .chars()
@@ -115,6 +128,7 @@ pub fn normalize_token(token: &str) -> String {
         .collect()
 }
 
+// Hashmap with a term and how many times it appears
 pub fn term_frequencies(tokens: &[String]) -> HashMap<String, usize> {
     let mut freqs = HashMap::new();
     for token in tokens {
@@ -123,6 +137,7 @@ pub fn term_frequencies(tokens: &[String]) -> HashMap<String, usize> {
     freqs
 }
 
+// BM25 rewards repeated terms but dampens very long documents | another document relevance metric
 pub fn bm25(
     tf: usize,
     doc_len: usize,
@@ -133,8 +148,6 @@ pub fn bm25(
     if tf == 0 || doc_len == 0 || total_docs == 0 || doc_freq == 0 {
         return 0.0;
     }
-
-    // BM25 rewards repeated terms but dampens very long documents.
     let k1 = 1.2;
     let b = 0.75;
     let tf = tf as f64;
@@ -142,17 +155,17 @@ pub fn bm25(
     let length_norm = 1.0 - b + b * (doc_len as f64 / avg_doc_len.max(1.0));
     idf * ((tf * (k1 + 1.0)) / (tf + k1 * length_norm))
 }
-
+// term frequence inverse document frequencey | another document relevance metric
 pub fn tfidf(tf: usize, doc_len: usize, total_docs: usize, doc_freq: usize) -> f64 {
     if tf == 0 || doc_len == 0 || total_docs == 0 || doc_freq == 0 {
         return 0.0;
     }
-
     let tf = tf as f64 / doc_len as f64;
     let idf = ((total_docs as f64 + 1.0) / (doc_freq as f64 + 1.0)).ln();
     tf * idf
 }
 
+// turns page contnet into a snippet containing queried terms
 pub fn snippet(text: &str, query_terms: &[String]) -> String {
     let lower = text.to_lowercase();
     let byte_start = query_terms
@@ -191,6 +204,7 @@ pub fn snippet(text: &str, query_terms: &[String]) -> String {
         .join(" ")
 }
 
+// self explanatory
 pub fn stop_words() -> HashSet<&'static str> {
     STOP_WORDS.iter().copied().collect()
 }

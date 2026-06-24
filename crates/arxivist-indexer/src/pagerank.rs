@@ -1,5 +1,8 @@
+// i dont wanna write down how page ranks works again.
+// it bassically prioritizes pages that have many bages linking to it.
 use arxivist_core::{CrawlOutcome, CrawlRecord};
 use std::collections::{HashMap, HashSet};
+
 use url::Url;
 
 pub fn compute_page_rank(
@@ -16,7 +19,6 @@ pub fn compute_page_rank(
     if page_count == 0 {
         return HashMap::new();
     }
-
     let mut outgoing: HashMap<Url, Vec<Url>> = HashMap::new();
     let mut incoming: HashMap<Url, Vec<Url>> = HashMap::new();
     for record in records {

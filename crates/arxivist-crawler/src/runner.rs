@@ -1,3 +1,4 @@
+// run crawler locally
 use crate::{args::Args, filters, record, spider_client, types::QueueItem};
 use anyhow::Result;
 use arxivist_core::{CrawlOutcome, CrawlSkipReason};
@@ -9,10 +10,14 @@ use std::{
 use tracing::{info, warn};
 
 pub async fn run(args: Args) -> Result<()> {
-    fs::create_dir_all(args.output_dir.join("content"))?;
+    if args.seeds.is_empty() {
+        anyhow::bail!("at least one --seed is required when --storage local is used");
+    }
 
+    fs::create_dir_all(args.output_dir.join("content"))?;
     let mut queue = VecDeque::new();
     let mut visited = HashSet::new();
+    // for each seed if not visited push to queue
     for seed in &args.seeds {
         if visited.insert(seed.as_str().to_owned()) {
             queue.push_back(QueueItem {
@@ -28,8 +33,9 @@ pub async fn run(args: Args) -> Result<()> {
     let mut stored = 0usize;
     let mut bad_hosts: HashMap<String, usize> = HashMap::new();
     let mut suppressed_hosts = HashSet::new();
-
+    // while seeds in queue
     while let Some(item) = queue.pop_front() {
+        // make sure we should be navigating
         if written >= args.max_pages {
             break;
         }
@@ -48,8 +54,9 @@ pub async fn run(args: Args) -> Result<()> {
             written += 1;
             continue;
         }
-
+        // record page
         let record = spider_client::crawl_one(&args, &item).await;
+        //update penalty metrics
         if filters::should_penalize(record.skip_reason) {
             let count = bad_hosts.entry(host.clone()).or_default();
             *count += 1;
@@ -62,9 +69,10 @@ pub async fn run(args: Args) -> Result<()> {
                 );
             }
         }
-
+        // increase
         if record.outcome == CrawlOutcome::Stored {
             stored += 1;
+            // if we arent at max depth insert next set of pages to queue
             if item.depth < args.max_depth {
                 for link in &record.links {
                     let key = link.as_str().to_owned();

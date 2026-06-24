@@ -1,3 +1,4 @@
+// filter websites for undesried traits
 use arxivist_core::CrawlSkipReason;
 
 pub const MIN_TEXT_CHARS: usize = 80;

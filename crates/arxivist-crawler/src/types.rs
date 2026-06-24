@@ -1,6 +1,8 @@
+// pub structs that are specific to the crawler
+use serde::{Deserialize, Serialize};
 use url::Url;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueItem {
     pub url: Url,
     pub source_seed: Url,

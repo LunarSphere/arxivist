@@ -1,7 +1,9 @@
+// code for parsing html
 use scraper::{Html, Selector};
 use std::collections::HashSet;
 use url::Url;
 
+// return title of html page as string if avail
 pub fn title(document: &Html) -> Option<String> {
     let selector = Selector::parse("title").ok()?;
     document
@@ -11,6 +13,7 @@ pub fn title(document: &Html) -> Option<String> {
         .filter(|title| !title.is_empty())
 }
 
+//return body of html page as a string
 pub fn text(document: &Html) -> String {
     let body_selector = Selector::parse("body").expect("static selector is valid");
     let source = document
@@ -22,6 +25,7 @@ pub fn text(document: &Html) -> String {
     source.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+// return list of links from html page
 pub fn links(base: &Url, document: &Html) -> Vec<Url> {
     let selector = Selector::parse("a[href]").expect("static selector is valid");
     let mut links = Vec::new();
