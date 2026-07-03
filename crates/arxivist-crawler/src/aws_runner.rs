@@ -57,6 +57,19 @@ pub async fn run(args: Args) -> Result<()> {
             continue;
         };
         let item: QueueItem = serde_json::from_str(body).context("decode crawl queue item")?;
+
+        if !stores
+            .reserve_crawl_budget(&args.crawl_id, args.max_pages)
+            .await?
+        {
+            info!(
+                crawl_id = %args.crawl_id,
+                max_pages = args.max_pages,
+                "shared aws crawl budget exhausted"
+            );
+            break;
+        }
+
         let record = if item
             .url
             .host_str()
@@ -222,6 +235,39 @@ impl AwsStores {
             .await
             .context("enqueue crawl item")?;
         Ok(())
+    }
+
+    // Reserve one shared crawl slot before a worker fetches an SQS item.
+    async fn reserve_crawl_budget(&self, crawl_id: &str, max_pages: usize) -> Result<bool> {
+        let budget_key = format!("crawl-budget#{crawl_id}");
+        let result = self
+            .dynamodb
+            .update_item()
+            .table_name(&self.crawl_urls_table)
+            .key("url_hash", AttributeValue::S(budget_key))
+            .update_expression(
+                "SET #status = :status, updated_at = :updated_at ADD processed_count :one",
+            )
+            .condition_expression(
+                "attribute_not_exists(processed_count) OR processed_count < :max_pages",
+            )
+            .expression_attribute_names("#status", "status")
+            .expression_attribute_values(":status", AttributeValue::S("active".to_owned()))
+            .expression_attribute_values(":updated_at", AttributeValue::S(now_ms().to_string()))
+            .expression_attribute_values(":one", AttributeValue::N("1".to_owned()))
+            .expression_attribute_values(":max_pages", AttributeValue::N(max_pages.to_string()))
+            .send()
+            .await;
+
+        if let Err(error) = result {
+            let message = error.to_string();
+            if message.contains("ConditionalCheckFailed") {
+                return Ok(false);
+            }
+            return Err(error).context("reserve shared crawl budget");
+        }
+
+        Ok(true)
     }
 
     // write crawl record to dynamodb

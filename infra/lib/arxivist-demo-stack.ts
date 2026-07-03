@@ -25,21 +25,22 @@ export class ArxivistDemoStack extends Stack {
     const monthlyBudgetUsd = Number(this.node.tryGetContext("monthlyBudgetUsd") ?? 90);
     const searchDesiredCount = Number(this.node.tryGetContext("searchDesiredCount") ?? 0);
     const crawlerMaxCapacity = Number(this.node.tryGetContext("crawlerMaxCapacity") ?? 4);
+    const crawlId = String(this.node.tryGetContext("crawlId") ?? "demo-50k");
+    const crawlMaxPages = Number(this.node.tryGetContext("crawlMaxPages") ?? 50_000);
+    const crawlMaxDepth = Number(this.node.tryGetContext("crawlMaxDepth") ?? 8);
+    const crawlDelayMs = Number(this.node.tryGetContext("crawlDelayMs") ?? 250);
+    const crawlEmptyReceiveLimit = Number(this.node.tryGetContext("crawlEmptyReceiveLimit") ?? 30);
     const name = (suffix: string) => `${props.projectName}-${suffix}`;
 
+    // Corpus data is intentionally retained so compute can be destroyed without re-crawling.
     const dataBucket = new s3.Bucket(this, "DataBucket", {
       bucketName: `${props.projectName}-data-${this.account}-${this.region}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
-      removalPolicy: RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+      autoDeleteObjects: false,
       lifecycleRules: [
-        {
-          id: "expire-demo-crawl-data",
-          prefix: "crawl/",
-          expiration: Duration.days(7)
-        },
         {
           id: "expire-old-index-artifacts",
           prefix: "indexes/",
@@ -56,7 +57,7 @@ export class ArxivistDemoStack extends Stack {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: true
       },
-      removalPolicy: RemovalPolicy.DESTROY
+      removalPolicy: RemovalPolicy.RETAIN
     });
 
     const crawlUrlsTable = new dynamodb.Table(this, "CrawlUrlsTable", {
@@ -64,7 +65,7 @@ export class ArxivistDemoStack extends Stack {
       partitionKey: { name: "url_hash", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       timeToLiveAttribute: "expires_at",
-      removalPolicy: RemovalPolicy.DESTROY
+      removalPolicy: RemovalPolicy.RETAIN
     });
 
     crawlUrlsTable.addGlobalSecondaryIndex({
@@ -120,9 +121,23 @@ export class ArxivistDemoStack extends Stack {
     const crawlerTask = this.workerTask("CrawlerTask", {
       family: name("crawler"),
       repository: crawlerRepository,
-      command: [],
+      command: [
+        "--storage",
+        "aws",
+        "--crawl-id",
+        crawlId,
+        "--max-pages",
+        String(crawlMaxPages),
+        "--max-depth",
+        String(crawlMaxDepth),
+        "--delay-ms",
+        String(crawlDelayMs)
+      ],
       logGroup,
       environment: {
+        ARXIVIST_STORAGE_MODE: "aws",
+        ARXIVIST_CRAWL_ID: crawlId,
+        ARXIVIST_EMPTY_RECEIVE_LIMIT: String(crawlEmptyReceiveLimit),
         ARXIVIST_DATA_BUCKET: dataBucket.bucketName,
         ARXIVIST_PAGES_TABLE: pagesTable.tableName,
         ARXIVIST_CRAWL_URLS_TABLE: crawlUrlsTable.tableName,
@@ -133,9 +148,10 @@ export class ArxivistDemoStack extends Stack {
     const indexerTask = this.workerTask("IndexerTask", {
       family: name("indexer"),
       repository: indexerRepository,
-      command: [],
+      command: ["--storage", "aws"],
       logGroup,
       environment: {
+        ARXIVIST_STORAGE_MODE: "aws",
         ARXIVIST_DATA_BUCKET: dataBucket.bucketName,
         ARXIVIST_PAGES_TABLE: pagesTable.tableName,
         ARXIVIST_CRAWL_URLS_TABLE: crawlUrlsTable.tableName,
@@ -165,11 +181,12 @@ export class ArxivistDemoStack extends Stack {
         logGroup
       }),
       environment: {
+        ARXIVIST_STORAGE_MODE: "aws",
         ARXIVIST_DATA_BUCKET: dataBucket.bucketName,
         ARXIVIST_ACTIVE_INDEX_KEY: "indexes/active/index.json",
         ARXIVIST_CORS_ORIGIN: demoCorsOrigin
       },
-      command: ["--bind", "0.0.0.0:3000"],
+      command: ["--storage", "aws", "--bind", "0.0.0.0:3000"],
       portMappings: [{ containerPort: 3000 }]
     });
 
@@ -264,6 +281,8 @@ export class ArxivistDemoStack extends Stack {
       value: `docker build --build-arg BIN=arxivist-search-api -t ${searchRepository.repositoryUri}:latest .`
     });
     new cdk.CfnOutput(this, "CrawlerMaxCapacity", { value: String(crawlerMaxCapacity) });
+    new cdk.CfnOutput(this, "CrawlId", { value: crawlId });
+    new cdk.CfnOutput(this, "CrawlMaxPages", { value: String(crawlMaxPages) });
   }
 
   private repository(id: string, repositoryName: string): ecr.Repository {

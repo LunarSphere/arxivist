@@ -11,6 +11,8 @@ pub struct Args {
     pub seeds: Vec<Url>,
     #[arg(long, default_value_t = 100)]
     pub max_pages: usize,
+    #[arg(long, default_value = "demo", env = "ARXIVIST_CRAWL_ID")]
+    pub crawl_id: String,
     #[arg(long, default_value_t = 2)]
     pub max_depth: usize,
     #[arg(long, default_value = "data/dev/crawl")]

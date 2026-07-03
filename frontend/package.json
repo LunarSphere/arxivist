@@ -4,8 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node build-config.mjs",
-    "dev": "node build-config.mjs && npx serve dist",
-    "vercel-build": "node build-config.mjs"
-  }
+    "build": "vite build && node build-config.mjs",
+    "dev": "vite --host 127.0.0.1",
+    "vercel-build": "npm run build"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.7",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {}
 }

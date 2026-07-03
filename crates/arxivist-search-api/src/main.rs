@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
     };
 
     let app = Router::new()
-        .route("/health", get(health)) //GET HEALTH 1XX, 2XX, 3XX, 4XX, 5XX
+        .route("/health", get(health)) //is our api end point alive
         .route("/search", post(search)) // SEARCH FOR THE PAGES
         .with_state(state)
         .layer(cors_layer())

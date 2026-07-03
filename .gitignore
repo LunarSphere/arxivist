@@ -5,3 +5,7 @@ node_modules/
 cdk.out/
 dist/
 .vercel/
+.agents/
+AGENTS.md
+.codex/
+crates/data/dev/

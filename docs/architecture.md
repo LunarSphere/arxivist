@@ -20,8 +20,11 @@ These boundaries mirror the planned AWS deployment while staying runnable on a l
 
 - Local `pages.jsonl` becomes DynamoDB metadata.
 - Local `content/` files become S3 page snapshots.
-- The in-process crawl queue becomes SQS.
+- The in-process crawl queue becomes SQS. -> persistent incase a cralwer crashes + shared queue between multiple crawlers
 - Local `index.json` becomes a versioned S3 artifact.
 - Local API startup index loading becomes Fargate startup loading from S3.
 
 Athena is reserved for offline SQL inspection over S3 data, not interactive search serving.
+
+The application binaries keep local storage as their default runtime and switch to these AWS
+adapters only when `--storage aws` or `ARXIVIST_STORAGE_MODE=aws` is set.
