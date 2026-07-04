@@ -149,6 +149,8 @@ export class ArxivistDemoStack extends Stack {
       family: name("indexer"),
       repository: indexerRepository,
       command: ["--storage", "aws"],
+      cpu: 1024,
+      memoryLimitMiB: 4096,
       logGroup,
       environment: {
         ARXIVIST_STORAGE_MODE: "aws",
@@ -170,8 +172,8 @@ export class ArxivistDemoStack extends Stack {
 
     const searchTask = new ecs.FargateTaskDefinition(this, "SearchTask", {
       family: name("search-api"),
-      cpu: 512,
-      memoryLimitMiB: 1024
+      cpu: 1024,
+      memoryLimitMiB: 4096
     });
 
     searchTask.addContainer("SearchApi", {
@@ -306,14 +308,16 @@ export class ArxivistDemoStack extends Stack {
       family: string;
       repository: ecr.IRepository;
       command: string[];
+      cpu?: number;
+      memoryLimitMiB?: number;
       logGroup: logs.ILogGroup;
       environment: Record<string, string>;
     }
   ): ecs.FargateTaskDefinition {
     const task = new ecs.FargateTaskDefinition(this, id, {
       family: props.family,
-      cpu: 512,
-      memoryLimitMiB: 1024
+      cpu: props.cpu ?? 512,
+      memoryLimitMiB: props.memoryLimitMiB ?? 1024
     });
 
     task.addContainer("Worker", {

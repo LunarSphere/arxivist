@@ -52,8 +52,11 @@ HTTPS origin:
 
 ```text
 ARXIVIST_API_BASE_URL=/api
-ARXIVIST_UPSTREAM_API_BASE_URL=<SearchApiUrl from the CDK output1>
+ARXIVIST_UPSTREAM_API_BASE_URL=<SearchApiUrl from the CDK outputs>
 ```
+
+Set the Vercel project root directory to `frontend` so the `api/` directory is deployed with the
+static app.
 
 The proxy forwards `GET /api/health` and `POST /api/search` to the Rust API. The browser keeps the
 same search request shape as local development:

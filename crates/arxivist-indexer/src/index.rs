@@ -6,6 +6,8 @@ use arxivist_core::{
 use std::collections::HashMap;
 use url::Url;
 
+const MAX_INDEX_SNIPPET_TEXT_BYTES: usize = 16 * 1024;
+
 pub fn build_index(records: Vec<CrawlRecord>, page_ranks: HashMap<Url, f64>) -> SearchIndex {
     let mut documents = Vec::new();
     let mut document_frequency: HashMap<String, usize> = HashMap::new();
@@ -23,6 +25,8 @@ pub fn build_index(records: Vec<CrawlRecord>, page_ranks: HashMap<Url, f64>) -> 
         let tokens = tokenize(&record.extracted_text);
         let token_count = tokens.len();
         let term_freqs = term_frequencies(&tokens);
+        let mut snippet_text = record.extracted_text;
+        truncate_string(&mut snippet_text, MAX_INDEX_SNIPPET_TEXT_BYTES);
         total_tokens += token_count;
 
         // Document frequency counts each term once per document.
@@ -34,7 +38,7 @@ pub fn build_index(records: Vec<CrawlRecord>, page_ranks: HashMap<Url, f64>) -> 
             id: documents.len(),
             url: final_url.clone(),
             title: record.title,
-            text: record.extracted_text,
+            text: snippet_text,
             token_count,
             term_freqs,
             page_rank: page_ranks.get(&final_url).copied().unwrap_or(1.0),
@@ -57,6 +61,18 @@ pub fn build_index(records: Vec<CrawlRecord>, page_ranks: HashMap<Url, f64>) -> 
         terms,
         average_doc_len,
     }
+}
+
+fn truncate_string(value: &mut String, max_bytes: usize) {
+    if value.len() <= max_bytes {
+        return;
+    }
+
+    let mut boundary = max_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
 }
 
 #[cfg(test)]
@@ -88,6 +104,25 @@ mod tests {
         assert_eq!(index.documents[0].url, stored_url);
         assert!(index.terms.contains_key("rust"));
         assert!(!index.terms.contains_key("should"));
+    }
+
+    #[test]
+    fn build_index_limits_stored_snippet_text() {
+        let url = Url::parse("https://example.com/large").unwrap();
+        let records = vec![record(
+            url,
+            CrawlOutcome::Stored,
+            None,
+            &"searchable ".repeat(20_000),
+        )];
+
+        let index = build_index(records, HashMap::new());
+
+        assert_eq!(index.documents.len(), 1);
+        assert!(index.documents[0].text.len() <= MAX_INDEX_SNIPPET_TEXT_BYTES);
+        assert!(
+            index.documents[0].token_count > index.documents[0].text.split_whitespace().count()
+        );
     }
 
     fn record(

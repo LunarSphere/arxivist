@@ -7,12 +7,21 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 use arxivist_core::{CrawlOutcome, CrawlRecord, CrawlSkipReason, content_hash};
 use aws_config::BehaviorVersion;
-use aws_sdk_dynamodb::{Client as DynamoClient, types::AttributeValue};
+use aws_sdk_dynamodb::{
+    Client as DynamoClient,
+    error::SdkError as DynamoSdkError,
+    operation::{put_item::PutItemError, update_item::UpdateItemError},
+    types::AttributeValue,
+};
 use aws_sdk_s3::{Client as S3Client, primitives::ByteStream};
 use aws_sdk_sqs::Client as SqsClient;
 use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 use url::Url;
+
+const DYNAMODB_RECORD_JSON_BUDGET_BYTES: usize = 350 * 1024;
+const MAX_DYNAMODB_TEXT_BYTES: usize = 192 * 1024;
+const MAX_DYNAMODB_LINKS: usize = 1_000;
 
 struct AwsStores {
     s3: S3Client,
@@ -220,8 +229,7 @@ impl AwsStores {
             .await;
 
         if let Err(error) = put {
-            let message = error.to_string();
-            if message.contains("ConditionalCheckFailed") {
+            if is_put_condition_failed(&error) {
                 return Ok(());
             }
             return Err(error).context("deduplicate crawl url");
@@ -260,8 +268,7 @@ impl AwsStores {
             .await;
 
         if let Err(error) = result {
-            let message = error.to_string();
-            if message.contains("ConditionalCheckFailed") {
+            if is_update_condition_failed(&error) {
                 return Ok(false);
             }
             return Err(error).context("reserve shared crawl budget");
@@ -279,6 +286,16 @@ impl AwsStores {
             .map(Url::as_str)
             .unwrap_or_default()
             .to_owned();
+        let (record_json, was_compacted) = dynamodb_record_json(record)?;
+
+        if was_compacted {
+            warn!(
+                requested_url = %record.requested_url,
+                content_path = ?record.content_path,
+                record_json_bytes = record_json.len(),
+                "compacted crawl record metadata for dynamodb item size limit"
+            );
+        }
 
         self.dynamodb
             .put_item()
@@ -294,10 +311,7 @@ impl AwsStores {
                 "fetched_at_ms",
                 AttributeValue::N(record.fetched_at_ms.to_string()),
             )
-            .item(
-                "record_json",
-                AttributeValue::S(serde_json::to_string(record)?),
-            )
+            .item("record_json", AttributeValue::S(record_json))
             .send()
             .await
             .context("write crawl record to dynamodb")?;
@@ -327,6 +341,69 @@ impl AwsStores {
     }
 }
 
+fn dynamodb_record_json(record: &CrawlRecord) -> Result<(String, bool)> {
+    let mut record = record.clone();
+    let mut compacted = false;
+
+    if record.extracted_text.len() > MAX_DYNAMODB_TEXT_BYTES {
+        truncate_string(&mut record.extracted_text, MAX_DYNAMODB_TEXT_BYTES);
+        compacted = true;
+    }
+
+    if record.links.len() > MAX_DYNAMODB_LINKS {
+        record.links.truncate(MAX_DYNAMODB_LINKS);
+        compacted = true;
+    }
+
+    loop {
+        let record_json = serde_json::to_string(&record)?;
+        if record_json.len() <= DYNAMODB_RECORD_JSON_BUDGET_BYTES {
+            return Ok((record_json, compacted));
+        }
+
+        compacted = true;
+
+        if record.links.len() > 128 {
+            record.links.truncate(record.links.len() / 2);
+            continue;
+        }
+
+        if !record.links.is_empty() {
+            record.links.clear();
+            continue;
+        }
+
+        if record.extracted_text.len() > 8 * 1024 {
+            let next_len = record.extracted_text.len() / 2;
+            truncate_string(&mut record.extracted_text, next_len);
+            continue;
+        }
+
+        if !record.extracted_text.is_empty() {
+            record.extracted_text.clear();
+            continue;
+        }
+
+        anyhow::bail!(
+            "crawl record metadata is {} bytes after compaction, above dynamodb budget of {} bytes",
+            record_json.len(),
+            DYNAMODB_RECORD_JSON_BUDGET_BYTES
+        );
+    }
+}
+
+fn truncate_string(value: &mut String, max_bytes: usize) {
+    if value.len() <= max_bytes {
+        return;
+    }
+
+    let mut boundary = max_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+}
+
 fn required(value: Option<&str>, name: &str) -> Result<String> {
     value
         .filter(|value| !value.trim().is_empty())
@@ -350,4 +427,90 @@ fn outcome_status(outcome: CrawlOutcome) -> String {
         CrawlOutcome::FetchFailed => "fetch_failed",
     }
     .to_owned()
+}
+
+fn is_put_condition_failed<R>(error: &DynamoSdkError<PutItemError, R>) -> bool {
+    error
+        .as_service_error()
+        .is_some_and(PutItemError::is_conditional_check_failed_exception)
+}
+
+fn is_update_condition_failed<R>(error: &DynamoSdkError<UpdateItemError, R>) -> bool {
+    error
+        .as_service_error()
+        .is_some_and(UpdateItemError::is_conditional_check_failed_exception)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_dynamodb::types::error::ConditionalCheckFailedException;
+
+    #[test]
+    fn detects_put_condition_failures() {
+        let error = DynamoSdkError::<PutItemError, ()>::service_error(
+            PutItemError::ConditionalCheckFailedException(
+                ConditionalCheckFailedException::builder().build(),
+            ),
+            (),
+        );
+
+        assert!(is_put_condition_failed(&error));
+    }
+
+    #[test]
+    fn detects_update_condition_failures() {
+        let error = DynamoSdkError::<UpdateItemError, ()>::service_error(
+            UpdateItemError::ConditionalCheckFailedException(
+                ConditionalCheckFailedException::builder().build(),
+            ),
+            (),
+        );
+
+        assert!(is_update_condition_failed(&error));
+    }
+
+    #[test]
+    fn does_not_treat_other_put_errors_as_duplicates() {
+        let error =
+            DynamoSdkError::<PutItemError, ()>::service_error(PutItemError::unhandled("boom"), ());
+
+        assert!(!is_put_condition_failed(&error));
+    }
+
+    #[test]
+    fn compacts_large_records_before_dynamodb_write() {
+        let url = Url::parse("https://example.com/large").unwrap();
+        let mut record = CrawlRecord {
+            schema_version: 2,
+            requested_url: url.clone(),
+            final_url: Some(url.clone()),
+            source_seed: url,
+            referrer: None,
+            depth: 0,
+            outcome: CrawlOutcome::Stored,
+            skip_reason: None,
+            title: Some("large".to_owned()),
+            status: Some(200),
+            content_type: Some("text/html".to_owned()),
+            content_length: Some(1_000_000),
+            content_hash: Some("hash".to_owned()),
+            content_path: Some("crawl/content/hash.html".to_owned()),
+            extracted_text: "x".repeat(600 * 1024),
+            links: Vec::new(),
+            fetched_at_ms: 1,
+        };
+        record.links = (0..3_000)
+            .map(|index| Url::parse(&format!("https://example.com/{index}")).unwrap())
+            .collect();
+
+        let (json, compacted) = dynamodb_record_json(&record).unwrap();
+        let stored: CrawlRecord = serde_json::from_str(&json).unwrap();
+
+        assert!(compacted);
+        assert!(json.len() <= DYNAMODB_RECORD_JSON_BUDGET_BYTES);
+        assert!(stored.extracted_text.len() < record.extracted_text.len());
+        assert!(stored.links.len() < record.links.len());
+        assert_eq!(stored.content_path, record.content_path);
+    }
 }

@@ -16,17 +16,19 @@ pub async fn run(args: &Args) -> Result<()> {
     let records = read_records(&dynamodb, &pages_table).await?;
     let page_ranks = pagerank::compute_page_rank(&records, 0.85, 20);
     let search_index = index::build_index(records, page_ranks);
-    let encoded = serde_json::to_vec_pretty(&search_index)?;
+    let docs = search_index.documents.len();
+    let encoded = serde_json::to_vec(&search_index)?;
+    drop(search_index);
     let versioned_key = versioned_index_key();
 
-    put_index(&s3, &bucket, &versioned_key, encoded.clone()).await?;
-    put_index(&s3, &bucket, &args.active_index_key, encoded).await?;
+    put_index(&s3, &bucket, &versioned_key, encoded).await?;
+    copy_index(&s3, &bucket, &versioned_key, &args.active_index_key).await?;
 
     info!(
         bucket,
         active_key = %args.active_index_key,
         versioned_key,
-        docs = search_index.documents.len(),
+        docs,
         "wrote aws index"
     );
     Ok(())
@@ -39,6 +41,7 @@ async fn read_records(dynamodb: &DynamoClient, table_name: &str) -> Result<Vec<C
         let output = dynamodb
             .scan()
             .table_name(table_name)
+            .projection_expression("record_json")
             .set_exclusive_start_key(start_key)
             .send()
             .await
@@ -68,6 +71,26 @@ async fn put_index(s3: &S3Client, bucket: &str, key: &str, bytes: Vec<u8>) -> Re
         .send()
         .await
         .with_context(|| format!("write index artifact to s3://{bucket}/{key}"))?;
+    Ok(())
+}
+
+async fn copy_index(
+    s3: &S3Client,
+    bucket: &str,
+    source_key: &str,
+    destination_key: &str,
+) -> Result<()> {
+    s3.copy_object()
+        .bucket(bucket)
+        .key(destination_key)
+        .copy_source(format!("{bucket}/{source_key}"))
+        .content_type("application/json")
+        .metadata_directive(aws_sdk_s3::types::MetadataDirective::Replace)
+        .send()
+        .await
+        .with_context(|| {
+            format!("copy index artifact from s3://{bucket}/{source_key} to s3://{bucket}/{destination_key}")
+        })?;
     Ok(())
 }
 
