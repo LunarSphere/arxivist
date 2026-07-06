@@ -1,11 +1,15 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 const config = window.ARXIVIST_CONFIG ?? {};
 const configuredApiBaseUrl = (config.apiBaseUrl ?? "").trim();
 const apiBaseUrl = (configuredApiBaseUrl || "http://127.0.0.1:3000").replace(/\/$/, "");
+const configuredAgentApiBaseUrl = (config.agentApiBaseUrl ?? "").trim();
+const agentApiBaseUrl = (configuredAgentApiBaseUrl || "http://127.0.0.1:8000").replace(/\/$/, "");
 const themeStorageKey = "arxivist-theme";
+const searchPageSize = 10;
+const agentSourceLimit = 5;
 
 const suggestionSeeds = [
   "graph neural networks",
@@ -20,6 +24,10 @@ const suggestionSeeds = [
 
 function apiUrl(path) {
   return `${apiBaseUrl}${path}`;
+}
+
+function agentApiUrl(path) {
+  return `${agentApiBaseUrl}${path}`;
 }
 
 function formatMetric(value) {
@@ -90,6 +98,16 @@ function ThemeIcon({ theme }) {
   );
 }
 
+function ArrowIcon({ direction }) {
+  const path = direction === "previous" ? "M15 18l-6-6 6-6" : "M9 6l6 6-6 6";
+
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d={path} />
+    </svg>
+  );
+}
+
 function SearchBox({ query, setQuery, onSearch, compact = false, loading = false }) {
   const [focused, setFocused] = useState(false);
   const suggestions = useMemo(() => getSuggestions(query), [query]);
@@ -151,11 +169,42 @@ function SearchBox({ query, setQuery, onSearch, compact = false, loading = false
   );
 }
 
-function SearchHome({ query, setQuery, onSearch, health, theme, toggleTheme, loading }) {
+function ModeSwitch({ searchMode, onModeChange }) {
+  return (
+    <div className="mode-switch" aria-label="Search mode">
+      <button
+        className={searchMode === "traditional" ? "active" : ""}
+        type="button"
+        onClick={() => onModeChange("traditional")}
+      >
+        Search
+      </button>
+      <button
+        className={searchMode === "agent" ? "active" : ""}
+        type="button"
+        onClick={() => onModeChange("agent")}
+      >
+        AI
+      </button>
+    </div>
+  );
+}
+
+function SearchHome({
+  query,
+  setQuery,
+  onSearch,
+  health,
+  theme,
+  toggleTheme,
+  loading,
+  searchMode,
+  onModeChange
+}) {
   return (
     <main className="home-shell">
       <header className="home-actions" aria-label="Page controls">
-        <button className="text-button" type="button">AI</button>
+        <button className="text-button" type="button" onClick={() => onModeChange("agent")}>AI</button>
         <IconButton label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} pressed={theme === "dark"} onClick={toggleTheme}>
           <ThemeIcon theme={theme} />
         </IconButton>
@@ -164,10 +213,7 @@ function SearchHome({ query, setQuery, onSearch, health, theme, toggleTheme, loa
 
       <section className="home-panel" aria-labelledby="page-title">
         <h1 id="page-title" className="brand">Arxivist</h1>
-        <div className="mode-switch" aria-label="Search mode">
-          <button className="active" type="button">Search</button>
-          <button type="button" aria-disabled="true">AI</button>
-        </div>
+        <ModeSwitch searchMode={searchMode} onModeChange={onModeChange} />
         <SearchBox query={query} setQuery={setQuery} onSearch={onSearch} loading={loading} />
         <p className="tagline">Private, focused search across your indexed research corpus.</p>
         <p className="health-line">{health}</p>
@@ -186,8 +232,18 @@ function SearchResults({
   health,
   theme,
   toggleTheme,
-  loading
+  loading,
+  currentPage,
+  totalPages,
+  totalResults,
+  hasPrevious,
+  hasNext,
+  searchMode,
+  onModeChange,
+  agentAssist
 }) {
+  const showPagination = totalResults > 0 && totalPages > 0 && !message;
+
   return (
     <main className="results-page">
       <header className="results-top">
@@ -196,7 +252,13 @@ function SearchResults({
         </button>
         <SearchBox query={query} setQuery={setQuery} onSearch={onSearch} compact loading={loading} />
         <div className="results-actions">
-          <button className="text-button" type="button">AI</button>
+          <button
+            className={`text-button ${searchMode === "agent" ? "active" : ""}`}
+            type="button"
+            onClick={() => onModeChange(searchMode === "agent" ? "traditional" : "agent")}
+          >
+            AI
+          </button>
           <IconButton label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} pressed={theme === "dark"} onClick={toggleTheme}>
             <ThemeIcon theme={theme} />
           </IconButton>
@@ -204,11 +266,11 @@ function SearchResults({
       </header>
 
       <nav className="tabs" aria-label="Result types">
-        <a className="active" href="#results">All</a>
+        <a className={searchMode === "traditional" ? "active" : ""} href="#results" onClick={() => onModeChange("traditional")}>All</a>
         <a href="#results">Papers</a>
         <a href="#results">Books</a>
         <a href="#results">Code</a>
-        <a href="#results">AI</a>
+        <a className={searchMode === "agent" ? "active" : ""} href="#results" onClick={() => onModeChange("agent")}>AI</a>
       </nav>
 
       <section className="filter-row" aria-label="Search filters">
@@ -217,17 +279,137 @@ function SearchResults({
       </section>
 
       <section id="results" className="results-shell" aria-live="polite">
+        {searchMode === "agent" ? <SearchAssist assist={agentAssist} /> : null}
         {loading ? <StateMessage title="Searching" body="Looking through the current index." /> : null}
         {!loading && message ? <StateMessage title={message.title} body={message.body} tone={message.tone} /> : null}
         {!loading && !message ? (
-          <ol className="result-list">
-            {results.map((item) => (
-              <ResultItem key={`${item.url}-${item.title}`} item={item} />
-            ))}
-          </ol>
+          <>
+            <ol className="result-list">
+              {results.map((item) => (
+                <ResultItem key={`${item.url}-${item.title}`} item={item} />
+              ))}
+            </ol>
+            {showPagination ? (
+              <PaginationFooter
+                query={query}
+                currentPage={currentPage}
+                totalPages={totalPages}
+                hasPrevious={hasPrevious}
+                hasNext={hasNext}
+                loading={loading}
+                onSearch={onSearch}
+              />
+            ) : null}
+          </>
         ) : null}
       </section>
     </main>
+  );
+}
+
+function SearchAssist({ assist }) {
+  if (assist.status === "idle") {
+    return null;
+  }
+
+  if (assist.status === "loading") {
+    return (
+      <section className="search-assist" aria-label="Search Assist">
+        <div className="assist-header">
+          <span className="assist-kicker">Search Assist</span>
+          <span className="assist-status">Thinking</span>
+        </div>
+        <p className="assist-loading">Reading the index and preparing an answer.</p>
+      </section>
+    );
+  }
+
+  if (assist.status === "error") {
+    return (
+      <section className="search-assist" data-tone="error" aria-label="Search Assist">
+        <div className="assist-header">
+          <span className="assist-kicker">Search Assist</span>
+          <span className="assist-status">Unavailable</span>
+        </div>
+        <p>{assist.error}</p>
+      </section>
+    );
+  }
+
+  const sources = (assist.sources ?? []).slice(0, agentSourceLimit);
+
+  return (
+    <section className="search-assist" aria-label="Search Assist">
+      <div className="assist-header">
+        <span className="assist-kicker">Search Assist</span>
+        <span className="assist-status">
+          {assist.llmCalls.toLocaleString()} model calls / {assist.toolCallCount.toLocaleString()} tool calls
+        </span>
+      </div>
+      <div className="assist-answer">
+        {splitAnswer(assist.answer).map((line, index) => (
+          <p key={`${line}-${index}`}>{line}</p>
+        ))}
+      </div>
+      {sources.length > 0 ? (
+        <div className="assist-sources" aria-label="Search Assist sources">
+          {sources.map((source) => (
+            <a key={source.url} href={source.url} target="_blank" rel="noreferrer" title={source.title || source.url}>
+              {source.title || sourceLabel(source.url)}
+            </a>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function splitAnswer(answer) {
+  const lines = String(answer || "").split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  return lines.length > 0 ? lines : ["No agent answer was returned."];
+}
+
+function sourceLabel(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
+function PaginationFooter({
+  query,
+  currentPage,
+  totalPages,
+  hasPrevious,
+  hasNext,
+  loading,
+  onSearch
+}) {
+  return (
+    <nav className="pagination-footer" aria-label="Search results pages">
+      <button
+        className="pagination-arrow"
+        type="button"
+        aria-label="Previous results page"
+        title="Previous results page"
+        disabled={!hasPrevious || loading}
+        onClick={() => onSearch(query, { page: currentPage - 1 })}
+      >
+        <ArrowIcon direction="previous" />
+      </button>
+      <span className="pagination-label">Page {currentPage.toLocaleString()} of {totalPages.toLocaleString()}</span>
+      <button
+        className="pagination-arrow"
+        type="button"
+        aria-label="Next results page"
+        title="Next results page"
+        disabled={!hasNext || loading}
+        onClick={() => onSearch(query, { page: currentPage + 1 })}
+      >
+        <ArrowIcon direction="next" />
+      </button>
+    </nav>
   );
 }
 
@@ -256,12 +438,20 @@ function ResultItem({ item }) {
 function App() {
   const [theme, setTheme] = useTheme();
   const [query, setQuery] = useState("");
+  const [searchMode, setSearchMode] = useState("traditional");
   const [results, setResults] = useState([]);
   const [health, setHealth] = useState("Checking index...");
   const [pageMode, setPageMode] = useState("home");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState(null);
   const [status, setStatus] = useState("Ready");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(0);
+  const [totalResults, setTotalResults] = useState(0);
+  const [hasPrevious, setHasPrevious] = useState(false);
+  const [hasNext, setHasNext] = useState(false);
+  const [agentAssist, setAgentAssist] = useState({ status: "idle" });
+  const agentRequestId = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -291,29 +481,49 @@ function App() {
 
   async function search(nextQuery, options = {}) {
     const trimmedQuery = nextQuery.trim();
+    const requestedMode = options.mode ?? searchMode;
     if (options.home) {
       setPageMode("home");
       setMessage(null);
       setResults([]);
       setStatus("Ready");
+      setCurrentPage(1);
+      setTotalPages(0);
+      setTotalResults(0);
+      setHasPrevious(false);
+      setHasNext(false);
+      agentRequestId.current += 1;
+      setAgentAssist({ status: "idle" });
       return;
     }
     if (!trimmedQuery) {
       return;
     }
 
+    const requestedPage = Math.max(1, options.page ?? 1);
     setQuery(trimmedQuery);
     setPageMode("results");
     setLoading(true);
     setMessage(null);
     setResults([]);
     setStatus("Searching...");
+    if (requestedMode === "agent" && requestedPage === 1) {
+      runAgentSearch(trimmedQuery);
+    } else if (requestedMode !== "agent") {
+      agentRequestId.current += 1;
+      setAgentAssist({ status: "idle" });
+    }
 
     try {
       const response = await fetch(apiUrl("/search"), {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ query: trimmedQuery, top_k: 10, mode: "traditional" })
+        body: JSON.stringify({
+          query: trimmedQuery,
+          page: requestedPage,
+          page_size: searchPageSize,
+          mode: "traditional"
+        })
       });
 
       if (!response.ok) {
@@ -322,19 +532,31 @@ function App() {
 
       const payload = await response.json();
       const nextResults = payload.results ?? [];
+      const nextPage = payload.page ?? requestedPage;
+      const nextTotalPages = payload.total_pages ?? 0;
+      const nextTotalResults = payload.total_results ?? nextResults.length;
       setResults(nextResults);
+      setCurrentPage(nextPage);
+      setTotalPages(nextTotalPages);
+      setTotalResults(nextTotalResults);
+      setHasPrevious(Boolean(payload.has_previous));
+      setHasNext(Boolean(payload.has_next));
       setStatus(
-        nextResults.length === 0
+        nextTotalResults === 0
           ? "No results found"
-          : `About ${nextResults.length.toLocaleString()} results`
+          : `Page ${nextPage.toLocaleString()} of ${nextTotalPages.toLocaleString()} / ${nextTotalResults.toLocaleString()} results`
       );
       setMessage(
-        nextResults.length === 0
+        nextTotalResults === 0
           ? { title: "No results found", body: "Try a broader phrase or check whether the crawler has indexed related pages." }
           : null
       );
     } catch (error) {
       setStatus("Search unavailable");
+      setTotalPages(0);
+      setTotalResults(0);
+      setHasPrevious(false);
+      setHasNext(false);
       setMessage({
         title: "Search API unavailable",
         body: error.message,
@@ -342,6 +564,64 @@ function App() {
       });
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function runAgentSearch(nextQuery) {
+    const requestId = agentRequestId.current + 1;
+    agentRequestId.current = requestId;
+    setAgentAssist({ status: "loading" });
+
+    try {
+      const response = await fetch(agentApiUrl("/agent/search"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          query: nextQuery,
+          top_k: searchPageSize,
+          context: agentContext()
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Agent search failed with ${response.status}`);
+      }
+
+      const payload = await response.json();
+      if (agentRequestId.current !== requestId) {
+        return;
+      }
+      setAgentAssist({
+        status: "success",
+        answer: payload.answer ?? "",
+        sources: payload.sources ?? [],
+        toolCallCount: payload.tool_call_count ?? 0,
+        llmCalls: payload.llm_calls ?? 0
+      });
+    } catch (error) {
+      if (agentRequestId.current !== requestId) {
+        return;
+      }
+      setAgentAssist({
+        status: "error",
+        error: error.message
+      });
+    }
+  }
+
+  function agentContext() {
+    const now = new Date();
+    return {
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      locale: navigator.language,
+      local_time: now.toISOString()
+    };
+  }
+
+  function changeMode(nextMode) {
+    setSearchMode(nextMode);
+    if (pageMode === "results" && query.trim()) {
+      search(query, { mode: nextMode, page: 1 });
     }
   }
 
@@ -357,6 +637,8 @@ function App() {
         theme={theme}
         toggleTheme={toggleTheme}
         loading={loading}
+        searchMode={searchMode}
+        onModeChange={changeMode}
       />
     );
   }
@@ -373,6 +655,14 @@ function App() {
       theme={theme}
       toggleTheme={toggleTheme}
       loading={loading}
+      currentPage={currentPage}
+      totalPages={totalPages}
+      totalResults={totalResults}
+      hasPrevious={hasPrevious}
+      hasNext={hasNext}
+      searchMode={searchMode}
+      onModeChange={changeMode}
+      agentAssist={agentAssist}
     />
   );
 }

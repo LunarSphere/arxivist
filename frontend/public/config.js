@@ -1,1 +1,1 @@
-window.ARXIVIST_CONFIG = { apiBaseUrl: "" };
+window.ARXIVIST_CONFIG = { apiBaseUrl: "", agentApiBaseUrl: "" };
