@@ -22,7 +22,7 @@ curl -s -X POST http://127.0.0.1:8000/agent/search \
   -d '{"query":"transformer retrieval","top_k":5}'
 ```
 
-## Production
+## Configuration
 
-AWS Lambda reads the OpenAI key from Secrets Manager through `OPENAI_API_KEY_SECRET_NAME`. The secret
-may be either a raw API key string or JSON with an `OPENAI_API_KEY` field.
+The agent reads `OPENAI_API_KEY` from the local process environment. Keep this key server-side; do
+not expose it through frontend or Vercel public variables.

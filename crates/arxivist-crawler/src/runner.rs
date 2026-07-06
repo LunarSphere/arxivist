@@ -313,7 +313,6 @@ fn prepare_local_output(args: &Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::args::StorageMode;
     use url::Url;
 
     #[tokio::test]
@@ -411,7 +410,6 @@ mod tests {
 
     fn args(seeds: Vec<Url>) -> Args {
         Args {
-            storage: StorageMode::Local,
             seeds,
             max_pages: 10,
             target_stored_pages: None,
@@ -421,11 +419,6 @@ mod tests {
             delay_ms: 0,
             concurrency: 2,
             bad_host_threshold: 3,
-            data_bucket: None,
-            pages_table: None,
-            crawl_urls_table: None,
-            crawl_queue_url: None,
-            empty_receive_limit: 1,
         }
     }
 

@@ -70,12 +70,12 @@ cd frontend
 npm run build
 ```
 
-For Vercel, use the built-in API proxy so the browser can call the AWS search API through the same
+For Vercel, use the built-in API proxy so the browser can call a hosted search API through the same
 HTTPS origin:
 
 ```text
 ARXIVIST_API_BASE_URL=/api
-ARXIVIST_UPSTREAM_API_BASE_URL=<SearchApiUrl from the CDK outputs>
+ARXIVIST_UPSTREAM_API_BASE_URL=<hosted Rust search API URL>
 ```
 
 Set the Vercel project root directory to `frontend` so the `api/` directory is deployed with the
@@ -105,23 +105,9 @@ The frontend defaults to the Rust API at `http://127.0.0.1:3000` and the agent A
 ```text
 ARXIVIST_API_BASE_URL=/api
 ARXIVIST_AGENT_API_BASE_URL=/api
-ARXIVIST_UPSTREAM_API_BASE_URL=<SearchApiUrl from the CDK outputs>
-ARXIVIST_UPSTREAM_AGENT_API_BASE_URL=<AgentApiUrl from the CDK outputs>
+ARXIVIST_UPSTREAM_API_BASE_URL=<hosted Rust search API URL>
+ARXIVIST_UPSTREAM_AGENT_API_BASE_URL=<hosted agent API URL>
 ```
 
-Do not commit the OpenAI API key or add it to frontend/Vercel variables. Production agent compute
-reads it from AWS Secrets Manager.
-
-## Production Direction
-
-The local file stores now have AWS demo adapters selected with `--storage aws` or
-`ARXIVIST_STORAGE_MODE=aws`:
-
-- ECS Fargate for crawler, indexer, and API containers.
-- SQS for durable crawl frontier jobs.
-- DynamoDB for crawl metadata and crawl URL de-duplication.
-- S3 for raw content snapshots and versioned index artifacts.
-- Athena for offline inspection of crawl data in S3.
-
-Local mode remains the default for every binary so each component can be tested without cloud
-access.
+Do not commit the OpenAI API key or add it to frontend/Vercel public variables. The agent reads it
+from its server-side process environment.

@@ -205,11 +205,3 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
-
-pub fn storage_content_path(hash: &str) -> String {
-    format!("crawl/content/{hash}.html")
-}
-
-pub fn extracted_payload_path(hash: &str) -> String {
-    format!("crawl/extracted/{hash}.json")
-}

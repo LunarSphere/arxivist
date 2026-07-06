@@ -1,5 +1,4 @@
 import contextvars
-import hashlib
 import html.parser
 import json
 import os
@@ -34,16 +33,8 @@ def _search_api_base_url() -> str:
     return os.getenv("ARXIVIST_SEARCH_API_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
 
 
-def _storage_mode() -> str:
-    return os.getenv("ARXIVIST_STORAGE_MODE", "local").lower()
-
-
 def _local_data_dir() -> Path:
     return Path(os.getenv("ARXIVIST_LOCAL_DATA_DIR", "data/dev"))
-
-
-def _url_hash(url: str) -> str:
-    return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
 @tool
@@ -96,10 +87,8 @@ def search(query: str, top_k: int = 0) -> str:
 def fetch_stored_page(url: str) -> str:
     """
     Fetch a page snapshot from Arxivist storage for a URL.
-    Local mode reads pages.jsonl and content files; AWS mode reads DynamoDB and S3.
+    Reads local pages.jsonl metadata and content files.
     """
-    if _storage_mode() == "aws":
-        return _fetch_stored_page_aws(url)
     return _fetch_stored_page_local(url)
 
 
@@ -165,110 +154,6 @@ def _fetch_stored_page_local(url: str) -> str:
             "text": _truncate(text, 6_000),
         }
     )
-
-
-def _fetch_stored_page_aws(url: str) -> str:
-    try:
-        import boto3
-        from boto3.dynamodb.conditions import Attr
-    except ImportError as error:
-        return _json(
-            {
-                "ok": False,
-                "tool": "fetch_stored_page",
-                "url": url,
-                "error": f"boto3 is required for AWS storage mode: {error}",
-            }
-        )
-
-    bucket = os.getenv("ARXIVIST_DATA_BUCKET")
-    table_name = os.getenv("ARXIVIST_PAGES_TABLE")
-    if not bucket or not table_name:
-        return _json(
-            {
-                "ok": False,
-                "tool": "fetch_stored_page",
-                "url": url,
-                "error": "ARXIVIST_DATA_BUCKET and ARXIVIST_PAGES_TABLE are required",
-            }
-        )
-
-    try:
-        dynamodb = boto3.resource("dynamodb")
-        table = dynamodb.Table(table_name)
-        response = table.get_item(Key={"url_hash": _url_hash(url)})
-        item = response.get("Item")
-        if item is None:
-            scan = table.scan(
-                FilterExpression=Attr("final_url").eq(url) | Attr("requested_url").eq(url),
-                Limit=1,
-            )
-            items = scan.get("Items", [])
-            item = items[0] if items else None
-        if item is None:
-            return _json(
-                {
-                    "ok": False,
-                    "tool": "fetch_stored_page",
-                    "url": url,
-                    "error": "no stored crawl record found for URL",
-                }
-            )
-
-        s3 = boto3.client("s3")
-        record = _aws_record_from_item(item, s3, bucket)
-    except Exception as error:
-        return _json(
-            {
-                "ok": False,
-                "tool": "fetch_stored_page",
-                "url": url,
-                "error": str(error),
-            }
-        )
-
-    return _json(
-        {
-            "ok": True,
-            "tool": "fetch_stored_page",
-            "url": record.get("final_url") or record.get("requested_url") or url,
-            "title": record.get("title"),
-            "source": "aws",
-            "text": _truncate(record.get("text", ""), 6_000),
-        }
-    )
-
-
-def _aws_record_from_item(item: dict[str, Any], s3: Any, bucket: str) -> dict[str, Any]:
-    payload_path = item.get("extracted_payload_path")
-    if payload_path:
-        payload = _read_s3_json(s3, bucket, payload_path)
-        return {
-            "requested_url": item.get("requested_url"),
-            "final_url": item.get("final_url"),
-            "title": item.get("title"),
-            "text": payload.get("extracted_text", ""),
-        }
-
-    record = json.loads(item.get("record_json", "{}"))
-    text = record.get("extracted_text") or ""
-    content_path = record.get("content_path") or item.get("content_path")
-    if content_path:
-        body = s3.get_object(Bucket=bucket, Key=content_path)["Body"].read()
-        text = _html_to_text(body.decode("utf-8", errors="replace")) or text
-
-    return {
-        "requested_url": record.get("requested_url") or item.get("requested_url"),
-        "final_url": record.get("final_url") or item.get("final_url"),
-        "title": record.get("title") or item.get("title"),
-        "text": text,
-    }
-
-
-def _read_s3_json(s3: Any, bucket: str, key: str) -> dict[str, Any]:
-    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
-    decoded = json.loads(body.decode("utf-8", errors="replace"))
-    return decoded if isinstance(decoded, dict) else {}
 
 
 @tool

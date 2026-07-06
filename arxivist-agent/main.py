@@ -1,5 +1,4 @@
 import base64
-import json
 import os
 from typing import Any
 
@@ -11,39 +10,7 @@ from graph import agent_build
 from tools import reset_request_context, set_request_context
 
 
-def _load_openai_api_key_from_secret() -> None:
-    """Production reads the OpenAI key from AWS Secrets Manager, never source."""
-    if os.getenv("OPENAI_API_KEY"):
-        return
-
-    secret_name = os.getenv("OPENAI_API_KEY_SECRET_NAME")
-    if not secret_name:
-        return
-
-    try:
-        import boto3
-
-        response = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
-    except Exception:
-        return
-
-    secret = response.get("SecretString")
-    if not secret:
-        return
-
-    try:
-        decoded = json.loads(secret)
-    except ValueError:
-        os.environ["OPENAI_API_KEY"] = secret
-        return
-
-    key = decoded.get("OPENAI_API_KEY") or decoded.get("openai_api_key")
-    if key:
-        os.environ["OPENAI_API_KEY"] = str(key)
-
-
 app = FastAPI(title="Arxivist Agent API")
-_load_openai_api_key_from_secret()
 agent = agent_build()
 
 

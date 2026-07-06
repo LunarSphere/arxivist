@@ -1,10 +1,8 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use arxivist_core::{
     DocumentShard, PostingsShard, RankedResult, SearchIndex, ShardedDocument, ShardedIndexManifest,
     ShardedTermStats, bm25, document_shard_for_id, snippet, tfidf, tokenize,
 };
-use aws_config::BehaviorVersion;
-use aws_sdk_s3::Client as S3Client;
 use axum::{
     Json, Router,
     extract::State,
@@ -25,30 +23,14 @@ use tracing::info;
 
 #[derive(Debug, Parser)]
 struct Args {
-    #[arg(long, value_enum, default_value_t = StorageMode::Local, env = "ARXIVIST_STORAGE_MODE")]
-    storage: StorageMode,
     #[arg(long, default_value = "data/dev/index")]
     index: PathBuf,
     #[arg(long, default_value = "127.0.0.1:3000")]
     bind: SocketAddr,
-    #[arg(long, env = "ARXIVIST_DATA_BUCKET")]
-    data_bucket: Option<String>,
-    #[arg(
-        long,
-        default_value = "indexes/active/manifest.json",
-        env = "ARXIVIST_ACTIVE_INDEX_KEY"
-    )]
-    active_index_key: String,
     #[arg(long, default_value_t = 32, env = "ARXIVIST_POSTINGS_CACHE_SHARDS")]
     postings_cache_shards: usize,
     #[arg(long, default_value_t = 64, env = "ARXIVIST_DOC_CACHE_SHARDS")]
     doc_cache_shards: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum StorageMode {
-    Local,
-    Aws,
 }
 
 #[derive(Clone)]
@@ -71,14 +53,7 @@ struct ShardedIndex {
 
 #[derive(Clone)]
 enum ShardedIndexStore {
-    Local {
-        root: PathBuf,
-    },
-    Aws {
-        bucket: String,
-        prefix: String,
-        s3: S3Client,
-    },
+    Local { root: PathBuf },
 }
 
 struct ShardCache<T> {
@@ -160,73 +135,35 @@ async fn main() -> Result<()> {
 }
 
 async fn load_index(args: &Args) -> Result<LoadedIndex> {
-    match args.storage {
-        StorageMode::Local if args.index.is_dir() => {
-            let manifest_path = args.index.join("manifest.json");
-            let manifest: ShardedIndexManifest =
-                serde_json::from_slice(&std::fs::read(&manifest_path).with_context(|| {
-                    format!("read local sharded manifest {}", manifest_path.display())
-                })?)
-                .context("decode sharded index manifest")?;
-            let terms_path = args.index.join(&manifest.terms_path);
-            let terms =
-                serde_json::from_slice(&std::fs::read(&terms_path).with_context(|| {
-                    format!("read local sharded terms {}", terms_path.display())
-                })?)
-                .context("decode sharded index terms")?;
-            Ok(LoadedIndex::Sharded(ShardedIndex::new(
-                manifest,
-                terms,
-                ShardedIndexStore::Local {
-                    root: args.index.clone(),
-                },
-                args.postings_cache_shards,
-                args.doc_cache_shards,
-            )))
-        }
-        StorageMode::Local => {
-            let bytes = std::fs::read(&args.index)
-                .with_context(|| format!("read local index {}", args.index.display()))?;
-            let mut index: SearchIndex =
-                serde_json::from_slice(&bytes).context("decode search index")?;
-            index.ensure_inverted_index();
-            Ok(LoadedIndex::Legacy(index))
-        }
-        StorageMode::Aws => {
-            let bucket = required(args.data_bucket.as_deref(), "ARXIVIST_DATA_BUCKET")?;
-            let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-            let s3 = S3Client::new(&config);
-            if args.active_index_key.ends_with("index.json") {
-                let bytes = read_s3_bytes(&s3, &bucket, &args.active_index_key).await?;
-                let mut index: SearchIndex =
-                    serde_json::from_slice(&bytes).context("decode search index")?;
-                index.ensure_inverted_index();
-                return Ok(LoadedIndex::Legacy(index));
-            }
-
-            let manifest_bytes = read_s3_bytes(&s3, &bucket, &args.active_index_key).await?;
-            let manifest: ShardedIndexManifest =
-                serde_json::from_slice(&manifest_bytes).context("decode sharded index manifest")?;
-            let prefix = active_index_prefix(&args.active_index_key);
-            let terms_key = format!("{prefix}/{}", manifest.terms_path);
-            let terms = serde_json::from_slice(&read_s3_bytes(&s3, &bucket, &terms_key).await?)
-                .context("decode sharded index terms")?;
-            Ok(LoadedIndex::Sharded(ShardedIndex::new(
-                manifest,
-                terms,
-                ShardedIndexStore::Aws { bucket, prefix, s3 },
-                args.postings_cache_shards,
-                args.doc_cache_shards,
-            )))
-        }
+    if args.index.is_dir() {
+        let manifest_path = args.index.join("manifest.json");
+        let manifest: ShardedIndexManifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).with_context(|| {
+                format!("read local sharded manifest {}", manifest_path.display())
+            })?)
+            .context("decode sharded index manifest")?;
+        let terms_path = args.index.join(&manifest.terms_path);
+        let terms = serde_json::from_slice(
+            &std::fs::read(&terms_path)
+                .with_context(|| format!("read local sharded terms {}", terms_path.display()))?,
+        )
+        .context("decode sharded index terms")?;
+        return Ok(LoadedIndex::Sharded(ShardedIndex::new(
+            manifest,
+            terms,
+            ShardedIndexStore::Local {
+                root: args.index.clone(),
+            },
+            args.postings_cache_shards,
+            args.doc_cache_shards,
+        )));
     }
-}
 
-fn required(value: Option<&str>, name: &str) -> Result<String> {
-    value
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("{name} is required when --storage aws is used"))
+    let bytes = std::fs::read(&args.index)
+        .with_context(|| format!("read local index {}", args.index.display()))?;
+    let mut index: SearchIndex = serde_json::from_slice(&bytes).context("decode search index")?;
+    index.ensure_inverted_index();
+    Ok(LoadedIndex::Legacy(index))
 }
 
 impl ShardedIndex {
@@ -297,10 +234,6 @@ impl ShardedIndexStore {
                     format!("read local sharded index artifact {}", path.display())
                 })
             }
-            ShardedIndexStore::Aws { bucket, prefix, s3 } => {
-                let key = format!("{}/{}", prefix.trim_end_matches('/'), path);
-                read_s3_bytes(s3, bucket, &key).await
-            }
         }
     }
 }
@@ -340,25 +273,6 @@ impl<T> ShardCache<T> {
     fn len(&self) -> usize {
         self.values.len()
     }
-}
-
-async fn read_s3_bytes(s3: &S3Client, bucket: &str, key: &str) -> Result<Vec<u8>> {
-    let output = s3
-        .get_object()
-        .bucket(bucket)
-        .key(key)
-        .send()
-        .await
-        .with_context(|| format!("read index artifact from s3://{bucket}/{key}"))?;
-    Ok(output.body.collect().await?.into_bytes().to_vec())
-}
-
-fn active_index_prefix(active_index_key: &str) -> String {
-    active_index_key
-        .trim_end_matches('/')
-        .strip_suffix("/manifest.json")
-        .unwrap_or_else(|| active_index_key.trim_end_matches('/'))
-        .to_owned()
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
