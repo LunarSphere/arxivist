@@ -52,7 +52,7 @@ def search(query: str, top_k: int = 0) -> str:
     Search the Arxivist index for pages relevant to a query.
     Returns ranked results with title, URL, snippet, and score.
     """
-    requested_top_k = top_k or REQUEST_CONTEXT.get({}).get("top_k", 10)
+    requested_top_k = top_k or REQUEST_CONTEXT.get().get("top_k", 10)
     top_k = max(1, min(int(requested_top_k), 20))
     try:
         response = httpx.post(
@@ -200,8 +200,7 @@ def _fetch_stored_page_aws(url: str) -> str:
         item = response.get("Item")
         if item is None:
             scan = table.scan(
-                FilterExpression=Attr("final_url").eq(url),
-                ProjectionExpression="record_json",
+                FilterExpression=Attr("final_url").eq(url) | Attr("requested_url").eq(url),
                 Limit=1,
             )
             items = scan.get("Items", [])
@@ -216,13 +215,8 @@ def _fetch_stored_page_aws(url: str) -> str:
                 }
             )
 
-        record = json.loads(item["record_json"])
-        content_path = record.get("content_path")
-        text = record.get("extracted_text") or ""
-        if content_path:
-            s3 = boto3.client("s3")
-            body = s3.get_object(Bucket=bucket, Key=content_path)["Body"].read()
-            text = _html_to_text(body.decode("utf-8", errors="replace")) or text
+        s3 = boto3.client("s3")
+        record = _aws_record_from_item(item, s3, bucket)
     except Exception as error:
         return _json(
             {
@@ -240,9 +234,41 @@ def _fetch_stored_page_aws(url: str) -> str:
             "url": record.get("final_url") or record.get("requested_url") or url,
             "title": record.get("title"),
             "source": "aws",
-            "text": _truncate(text, 6_000),
+            "text": _truncate(record.get("text", ""), 6_000),
         }
     )
+
+
+def _aws_record_from_item(item: dict[str, Any], s3: Any, bucket: str) -> dict[str, Any]:
+    payload_path = item.get("extracted_payload_path")
+    if payload_path:
+        payload = _read_s3_json(s3, bucket, payload_path)
+        return {
+            "requested_url": item.get("requested_url"),
+            "final_url": item.get("final_url"),
+            "title": item.get("title"),
+            "text": payload.get("extracted_text", ""),
+        }
+
+    record = json.loads(item.get("record_json", "{}"))
+    text = record.get("extracted_text") or ""
+    content_path = record.get("content_path") or item.get("content_path")
+    if content_path:
+        body = s3.get_object(Bucket=bucket, Key=content_path)["Body"].read()
+        text = _html_to_text(body.decode("utf-8", errors="replace")) or text
+
+    return {
+        "requested_url": record.get("requested_url") or item.get("requested_url"),
+        "final_url": record.get("final_url") or item.get("final_url"),
+        "title": record.get("title") or item.get("title"),
+        "text": text,
+    }
+
+
+def _read_s3_json(s3: Any, bucket: str, key: str) -> dict[str, Any]:
+    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    decoded = json.loads(body.decode("utf-8", errors="replace"))
+    return decoded if isinstance(decoded, dict) else {}
 
 
 @tool

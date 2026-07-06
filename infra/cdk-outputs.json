@@ -1,12 +1,14 @@
 {
   "ArxivistDemoStack": {
-    "CrawlerImageBuild": "docker build --build-arg BIN=arxivist-crawler -t 125773060453.dkr.ecr.us-east-1.amazonaws.com/arxivist-crawler:latest .",
-    "SearchApiImageBuild": "docker build --build-arg BIN=arxivist-search-api -t 125773060453.dkr.ecr.us-east-1.amazonaws.com/arxivist-search-api:latest .",
+    "OpenAiApiKeySecretName": "arxivist/openai-api-key",
+    "AgentApiUrl": "https://1unhukovpi.execute-api.us-east-1.amazonaws.com",
     "DataBucketName": "arxivist-data-125773060453-us-east-1",
-    "IndexerImageBuild": "docker build --build-arg BIN=arxivist-indexer -t 125773060453.dkr.ecr.us-east-1.amazonaws.com/arxivist-indexer:latest .",
     "CrawlMaxPages": "50000",
     "CrawlQueueUrl": "https://sqs.us-east-1.amazonaws.com/125773060453/arxivist-crawl-frontier",
     "CrawlUrlsTableName": "arxivist-crawl-urls",
+    "CrawlerImageBuild": "docker build --build-arg BIN=arxivist-crawler -t 125773060453.dkr.ecr.us-east-1.amazonaws.com/arxivist-crawler:latest .",
+    "SearchApiImageBuild": "docker build --build-arg BIN=arxivist-search-api -t 125773060453.dkr.ecr.us-east-1.amazonaws.com/arxivist-search-api:latest .",
+    "IndexerImageBuild": "docker build --build-arg BIN=arxivist-indexer -t 125773060453.dkr.ecr.us-east-1.amazonaws.com/arxivist-indexer:latest .",
     "PagesTableName": "arxivist-pages",
     "CrawlId": "demo-50k",
     "SearchApiUrl": "http://arxivist-search-api-911169521.us-east-1.elb.amazonaws.com",

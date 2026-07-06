@@ -14,7 +14,7 @@ struct Args {
     storage: StorageMode,
     #[arg(long, default_value = "data/dev/crawl/pages.jsonl")]
     crawl_records: PathBuf,
-    #[arg(long, default_value = "data/dev/index/index.json")]
+    #[arg(long, default_value = "data/dev/index")]
     output: PathBuf,
     #[arg(long, env = "ARXIVIST_DATA_BUCKET")]
     data_bucket: Option<String>,
@@ -22,7 +22,7 @@ struct Args {
     pages_table: Option<String>,
     #[arg(
         long,
-        default_value = "indexes/active/index.json",
+        default_value = "indexes/active/manifest.json",
         env = "ARXIVIST_ACTIVE_INDEX_KEY"
     )]
     active_index_key: String,
@@ -51,11 +51,28 @@ async fn main() -> Result<()> {
     let page_ranks = pagerank::compute_page_rank(&records, 0.85, 20);
     let index = index::build_index(records, page_ranks);
 
-    if let Some(parent) = args.output.parent() {
-        fs::create_dir_all(parent)?;
+    if args
+        .output
+        .extension()
+        .is_some_and(|extension| extension == "json")
+    {
+        if let Some(parent) = args.output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&args.output, serde_json::to_vec_pretty(&index)?)?;
+        info!(path = %args.output.display(), docs = index.documents.len(), "wrote legacy index");
+    } else {
+        fs::create_dir_all(&args.output)?;
+        let version = index::version_from_time();
+        index::write_sharded_index(&index, &args.output, &version)?;
+        info!(
+            path = %args.output.display(),
+            version,
+            docs = index.documents.len(),
+            terms = index.terms.len(),
+            "wrote sharded index"
+        );
     }
-    fs::write(&args.output, serde_json::to_vec_pretty(&index)?)?;
-    info!(path = %args.output.display(), docs = index.documents.len(), "wrote index");
     Ok(())
 }
 

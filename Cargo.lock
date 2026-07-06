@@ -167,6 +167,7 @@ dependencies = [
  "aws-sdk-dynamodb",
  "aws-sdk-s3",
  "clap",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

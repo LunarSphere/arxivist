@@ -1,3 +1,6 @@
+import base64
+import json
+import os
 from typing import Any
 
 from fastapi import FastAPI
@@ -7,7 +10,40 @@ from pydantic import BaseModel, Field
 from graph import agent_build
 from tools import reset_request_context, set_request_context
 
+
+def _load_openai_api_key_from_secret() -> None:
+    """Production reads the OpenAI key from AWS Secrets Manager, never source."""
+    if os.getenv("OPENAI_API_KEY"):
+        return
+
+    secret_name = os.getenv("OPENAI_API_KEY_SECRET_NAME")
+    if not secret_name:
+        return
+
+    try:
+        import boto3
+
+        response = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
+    except Exception:
+        return
+
+    secret = response.get("SecretString")
+    if not secret:
+        return
+
+    try:
+        decoded = json.loads(secret)
+    except ValueError:
+        os.environ["OPENAI_API_KEY"] = secret
+        return
+
+    key = decoded.get("OPENAI_API_KEY") or decoded.get("openai_api_key")
+    if key:
+        os.environ["OPENAI_API_KEY"] = str(key)
+
+
 app = FastAPI(title="Arxivist Agent API")
+_load_openai_api_key_from_secret()
 agent = agent_build()
 
 
@@ -160,6 +196,55 @@ def _content_to_text(content: Any) -> str:
                 parts.append(str(item))
         return "\n".join(part for part in parts if part)
     return str(content)
+
+
+def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    """Small API Gateway adapter for the same local FastAPI route contract."""
+    method = (
+        event.get("requestContext", {})
+        .get("http", {})
+        .get("method", event.get("httpMethod", ""))
+    )
+    path = (
+        event.get("rawPath")
+        or event.get("path")
+        or event.get("requestContext", {}).get("http", {}).get("path", "")
+    )
+
+    if method == "GET" and path.endswith("/agent/health"):
+        return _lambda_json(200, health())
+
+    if method == "POST" and path.endswith("/agent/search"):
+        try:
+            body = _lambda_body(event)
+            request = AgentSearchRequest.model_validate_json(body)
+            response = agent_search(request)
+        except Exception as error:
+            return _lambda_json(400, {"error": str(error)})
+
+        return _lambda_json(200, response.model_dump())
+
+    return _lambda_json(404, {"error": "Not found"})
+
+
+def _lambda_body(event: dict[str, Any]) -> str:
+    body = event.get("body") or "{}"
+    if event.get("isBase64Encoded"):
+        return base64.b64decode(body).decode("utf-8")
+    return body
+
+
+def _lambda_json(status_code: int, body: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "content-type": "application/json",
+            "access-control-allow-origin": "*",
+            "access-control-allow-methods": "GET,POST,OPTIONS",
+            "access-control-allow-headers": "content-type",
+        },
+        "body": json.dumps(body),
+    }
 
 
 def main():

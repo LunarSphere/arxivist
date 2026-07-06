@@ -1,21 +1,44 @@
 # Arxivist
 
-Arxivist is the production rewrite of the legacy Rust search-engine learning project.
+Arxivist is an agentic search engine for 
 
 The current implementation starts with a local development pipeline:
 
 1. Crawl pages into local metadata/content files.
 2. Build a BM25/TF-IDF/PageRank index artifact.
 3. Serve traditional search through a Rust HTTP API.
+4. Serve agentic search through the arxivist-agent
 
-`Legacy/` is read-only reference material and is intentionally not part of the new workspace.
+`Legacy/` is the original version of the search engine that I wrote from scratch.
+it is read-only reference material and is intentionally not part of the new workspace.
+
 
 ## Local Pipeline
 
+For a broad local English crawl, run one crawler process with 8 async workers.
+`--target-stored-pages` is the goal for saved/indexable pages; `--max-pages` is
+the attempted URL safety cap for skipped, blocked, and failed pages.
+
 ```bash
-cargo run -p arxivist-crawler -- --seed https://books.toscrape.com/ --max-pages 25
-cargo run -p arxivist-indexer
-cargo run -p arxivist-search-api
+cargo run -p arxivist-crawler -- \
+  --concurrency 8 \
+  --target-stored-pages 64000 \
+  --max-pages 256000 \
+  --max-depth 6 \
+  --delay-ms 700 \
+  --output-dir data/dev/crawl \
+  --seed https://www.riotgames.com/en \
+  --seed https://www.formula1.com/ \
+  --seed https://en.wikipedia.org/wiki/Main_Page \
+  --seed https://developer.mozilla.org/en-US/ \
+  --seed https://doc.rust-lang.org/book/ \
+  --seed https://docs.python.org/3/ \
+  --seed https://www.espn.com/ \
+  --seed https://www.ign.com/ \
+  --seed https://news.ycombinator.com/ \
+  --seed https://www.britannica.com/
+cargo run -p arxivist-indexer -- --output data/dev/index
+cargo run -p arxivist-search-api -- --index data/dev/index
 ```
 
 Then query:
@@ -64,6 +87,30 @@ same search request shape as local development:
 ```json
 { "query": "book mystery", "top_k": 10, "mode": "traditional" }
 ```
+
+Agentic search is served separately and can be enabled without changing traditional search. For
+local development, run the Rust search API and then start the Python agent with your OpenAI key in
+the shell environment:
+
+```bash
+export OPENAI_API_KEY="<your key>"
+export ARXIVIST_SEARCH_API_BASE_URL=http://127.0.0.1:3000
+cd arxivist-agent
+uv run uvicorn main:app --reload
+```
+
+The frontend defaults to the Rust API at `http://127.0.0.1:3000` and the agent API at
+`http://127.0.0.1:8000`. For Vercel, keep browser calls same-origin and set:
+
+```text
+ARXIVIST_API_BASE_URL=/api
+ARXIVIST_AGENT_API_BASE_URL=/api
+ARXIVIST_UPSTREAM_API_BASE_URL=<SearchApiUrl from the CDK outputs>
+ARXIVIST_UPSTREAM_AGENT_API_BASE_URL=<AgentApiUrl from the CDK outputs>
+```
+
+Do not commit the OpenAI API key or add it to frontend/Vercel variables. Production agent compute
+reads it from AWS Secrets Manager.
 
 ## Production Direction
 

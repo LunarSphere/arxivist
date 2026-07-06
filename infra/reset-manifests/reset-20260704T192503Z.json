@@ -1,0 +1,28 @@
+{
+  "run_id": "20260704T192503Z",
+  "confirmed": false,
+  "project_name": "arxivist",
+  "region": "us-east-1",
+  "account_id": "125773060453",
+  "data_bucket": "arxivist-data-125773060453-us-east-1",
+  "pages_table": {"name": "arxivist-pages", "pre_delete_count": 25576},
+  "crawl_urls_table": {"name": "arxivist-crawl-urls", "pre_delete_count": 2416287},
+  "queues": {"crawl": "https://sqs.us-east-1.amazonaws.com/125773060453/arxivist-crawl-frontier", "dlq": "https://sqs.us-east-1.amazonaws.com/125773060453/arxivist-crawl-dlq"},
+  "s3_prefixes": [
+    {"prefix": "crawl/content/", "pre_delete_count": 1000
+1000
+1000
+1000
+1000
+1000
+1000
+1000
+1000
+1000
+1000
+297},
+    {"prefix": "crawl/extracted/", "pre_delete_count": 0},
+    {"prefix": "indexes/active/", "pre_delete_count": 1},
+    {"prefix": "indexes/versions/", "pre_delete_count": 3}
+  ]
+}

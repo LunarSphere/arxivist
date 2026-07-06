@@ -6,7 +6,9 @@ use crate::{
     types::{PageSnapshot, QueueItem},
 };
 use anyhow::{Context, Result};
-use arxivist_core::{CrawlOutcome, CrawlRecord, CrawlSkipReason, content_hash};
+use arxivist_core::{
+    CrawlExtractedPayload, CrawlOutcome, CrawlRecord, CrawlSkipReason, content_hash,
+};
 use scraper::Html;
 use std::{
     fs::{self, OpenOptions},
@@ -16,14 +18,42 @@ use std::{
 };
 use tracing::warn;
 use url::Url;
-
+// this function writes url page content to the file system
 pub fn from_snapshot(args: &Args, item: &QueueItem, snapshot: PageSnapshot) -> CrawlRecord {
-    let content_path = format!("content/{}.html", content_hash(&snapshot.html));
-    if let Err(error) = fs::write(args.output_dir.join(&content_path), &snapshot.html) {
-        warn!(path = %content_path, ?error, "failed to write page content");
+    let html = snapshot.html.clone();
+    let mut record = from_snapshot_with_content_path(item, snapshot, None);
+    if record.outcome == CrawlOutcome::Stored {
+        let hash = record
+            .content_hash
+            .clone()
+            .unwrap_or_else(|| content_hash(&html));
+        let content_path = format!("content/{hash}.html"); // create a hash and that will be the path for page content
+        if let Err(error) = fs::write(args.output_dir.join(&content_path), &html) {
+            warn!(path = %content_path, ?error, "failed to write page content");
+        } else {
+            record.content_path = Some(content_path);
+        }
+
+        let extracted_path = format!("extracted/{hash}.json"); // where we stored extracted page contnet aka extracted text and links
+        let payload = CrawlExtractedPayload {
+            extracted_text: record.extracted_text.clone(),
+            links: record.links.clone(),
+        };
+        // file i/o
+        if let Some(parent) = args.output_dir.join(&extracted_path).parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(error) = fs::write(
+            args.output_dir.join(&extracted_path),
+            serde_json::to_vec(&payload).unwrap_or_default(),
+        ) {
+            warn!(path = %extracted_path, ?error, "failed to write extracted payload");
+        } else {
+            record.extracted_payload_path = Some(extracted_path);
+        }
     }
 
-    from_snapshot_with_content_path(item, snapshot, Some(content_path))
+    record
 }
 
 pub fn from_snapshot_with_content_path(
@@ -43,6 +73,16 @@ pub fn from_snapshot_with_content_path(
             snapshot,
             links,
             CrawlSkipReason::NonHtml,
+            extracted_text,
+        );
+    }
+
+    if filters::is_explicitly_non_english(&document) {
+        return skipped(
+            item,
+            snapshot,
+            links,
+            CrawlSkipReason::NonEnglish,
             extracted_text,
         );
     }
@@ -84,6 +124,7 @@ pub fn from_snapshot_with_content_path(
         content_length,
         content_hash: Some(hash),
         content_path,
+        extracted_payload_path: None,
         extracted_text,
         links,
         fetched_at_ms: now_ms(),
@@ -112,6 +153,7 @@ pub fn skipped(
         content_length: Some(snapshot.html.len() as u64),
         content_hash: None,
         content_path: None,
+        extracted_payload_path: None,
         extracted_text,
         links,
         fetched_at_ms: now_ms(),
@@ -138,6 +180,7 @@ pub fn diagnostic(
         content_length: None,
         content_hash: None,
         content_path: None,
+        extracted_payload_path: None,
         extracted_text: String::new(),
         links: Vec::new(),
         fetched_at_ms: now_ms(),
@@ -165,4 +208,8 @@ fn now_ms() -> u64 {
 
 pub fn storage_content_path(hash: &str) -> String {
     format!("crawl/content/{hash}.html")
+}
+
+pub fn extracted_payload_path(hash: &str) -> String {
+    format!("crawl/extracted/{hash}.json")
 }

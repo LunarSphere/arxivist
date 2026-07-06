@@ -5,6 +5,8 @@ interface ArxivistDemoStackProps extends StackProps {
 }
 export declare class ArxivistDemoStack extends Stack {
     constructor(scope: Construct, id: string, props: ArxivistDemoStackProps);
+    private addGlobalCostTags;
+    private addServiceTags;
     private repository;
     private workerTask;
 }

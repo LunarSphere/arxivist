@@ -5,7 +5,9 @@ use crate::{
     types::{PageSnapshot, QueueItem},
 };
 use anyhow::{Context, Result, anyhow};
-use arxivist_core::{CrawlOutcome, CrawlRecord, CrawlSkipReason, content_hash};
+use arxivist_core::{
+    CrawlExtractedPayload, CrawlOutcome, CrawlRecord, CrawlSkipReason, content_hash,
+};
 use aws_config::BehaviorVersion;
 use aws_sdk_dynamodb::{
     Client as DynamoClient,
@@ -19,8 +21,12 @@ use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 use url::Url;
 
+#[cfg(test)]
 const DYNAMODB_RECORD_JSON_BUDGET_BYTES: usize = 350 * 1024;
+const DYNAMODB_METADATA_JSON_BUDGET_BYTES: usize = 32 * 1024;
+#[cfg(test)]
 const MAX_DYNAMODB_TEXT_BYTES: usize = 192 * 1024;
+#[cfg(test)]
 const MAX_DYNAMODB_LINKS: usize = 1_000;
 
 struct AwsStores {
@@ -52,86 +58,110 @@ pub async fn run(args: Args) -> Result<()> {
     let mut bad_hosts: HashMap<String, usize> = HashMap::new();
     let mut suppressed_hosts = HashSet::new();
 
-    while processed < args.max_pages && empty_receives < args.empty_receive_limit {
-        let Some(message) = stores.receive_one().await? else {
+    while processed < args.max_pages
+        && args
+            .target_stored_pages
+            .is_none_or(|target| stored < target)
+        && empty_receives < args.empty_receive_limit
+    {
+        let messages = stores
+            .receive_batch(sqs_batch_size(args.concurrency))
+            .await?;
+        if messages.is_empty() {
             empty_receives += 1;
             continue;
-        };
+        }
         empty_receives = 0;
 
-        let Some(body) = message.body() else {
+        let mut budget_exhausted = false;
+        for message in messages {
+            if processed >= args.max_pages
+                || args
+                    .target_stored_pages
+                    .is_some_and(|target| stored >= target)
+            {
+                break;
+            }
+
+            let Some(body) = message.body() else {
+                if let Some(handle) = message.receipt_handle() {
+                    stores.delete_message(handle).await?;
+                }
+                continue;
+            };
+            let item: QueueItem = serde_json::from_str(body).context("decode crawl queue item")?;
+
+            if !stores
+                .reserve_crawl_budget(&args.crawl_id, args.max_pages)
+                .await?
+            {
+                info!(
+                    crawl_id = %args.crawl_id,
+                    max_pages = args.max_pages,
+                    "shared aws crawl budget exhausted"
+                );
+                budget_exhausted = true;
+                break;
+            }
+
+            let record = if item
+                .url
+                .host_str()
+                .is_some_and(|host| suppressed_hosts.contains(host))
+            {
+                record::diagnostic(
+                    &item,
+                    CrawlOutcome::HostSuppressed,
+                    Some(CrawlSkipReason::BadHostThreshold),
+                )
+            } else {
+                crawl_and_store(&args, &stores, &item).await?
+            };
+
+            if filters::should_penalize(record.skip_reason) {
+                if let Some(host) = item.url.host_str().map(str::to_owned) {
+                    let count = bad_hosts.entry(host.clone()).or_default();
+                    *count += 1;
+                    if *count >= args.bad_host_threshold {
+                        suppressed_hosts.insert(host);
+                    }
+                }
+            }
+
+            if record.outcome == CrawlOutcome::Stored {
+                stored += 1;
+                if item.depth < args.max_depth {
+                    for link in &record.links {
+                        stores
+                            .enqueue_if_new(&QueueItem {
+                                url: link.clone(),
+                                source_seed: item.source_seed.clone(),
+                                referrer: record.final_url.clone(),
+                                depth: item.depth + 1,
+                            })
+                            .await?;
+                    }
+                }
+            }
+
+            stores.put_record(&record).await?;
             if let Some(handle) = message.receipt_handle() {
                 stores.delete_message(handle).await?;
             }
-            continue;
-        };
-        let item: QueueItem = serde_json::from_str(body).context("decode crawl queue item")?;
 
-        if !stores
-            .reserve_crawl_budget(&args.crawl_id, args.max_pages)
-            .await?
-        {
+            processed += 1;
             info!(
-                crawl_id = %args.crawl_id,
-                max_pages = args.max_pages,
-                "shared aws crawl budget exhausted"
+                requested_url = %record.requested_url,
+                outcome = ?record.outcome,
+                stored,
+                processed,
+                "processed aws crawl record"
             );
+        }
+
+        if budget_exhausted {
             break;
         }
-
-        let record = if item
-            .url
-            .host_str()
-            .is_some_and(|host| suppressed_hosts.contains(host))
-        {
-            record::diagnostic(
-                &item,
-                CrawlOutcome::HostSuppressed,
-                Some(CrawlSkipReason::BadHostThreshold),
-            )
-        } else {
-            crawl_and_store(&args, &stores, &item).await?
-        };
-
-        if filters::should_penalize(record.skip_reason) {
-            if let Some(host) = item.url.host_str().map(str::to_owned) {
-                let count = bad_hosts.entry(host.clone()).or_default();
-                *count += 1;
-                if *count >= args.bad_host_threshold {
-                    suppressed_hosts.insert(host);
-                }
-            }
-        }
-
-        if record.outcome == CrawlOutcome::Stored {
-            stored += 1;
-            if item.depth < args.max_depth {
-                for link in &record.links {
-                    stores
-                        .enqueue_if_new(&QueueItem {
-                            url: link.clone(),
-                            source_seed: item.source_seed.clone(),
-                            referrer: record.final_url.clone(),
-                            depth: item.depth + 1,
-                        })
-                        .await?;
-                }
-            }
-        }
-
-        stores.put_record(&record).await?;
-        if let Some(handle) = message.receipt_handle() {
-            stores.delete_message(handle).await?;
-        }
-
-        processed += 1;
-        info!(
-            requested_url = %record.requested_url,
-            outcome = ?record.outcome,
-            stored,
-            processed,
-            "processed aws crawl record"
-        );
     }
 
     info!(stored, processed, "aws crawl complete");
@@ -153,10 +183,17 @@ async fn record_from_aws_snapshot(
     let hash = content_hash(&snapshot.html);
     let content_path = record::storage_content_path(&hash);
     let html = snapshot.html.clone();
-    let record =
+    let mut record =
         record::from_snapshot_with_content_path(item, snapshot, Some(content_path.clone()));
 
     if record.outcome == CrawlOutcome::Stored {
+        let extracted_payload_path = record::extracted_payload_path(&hash);
+        record.extracted_payload_path = Some(extracted_payload_path.clone());
+        let extracted_payload = CrawlExtractedPayload {
+            extracted_text: record.extracted_text.clone(),
+            links: record.links.clone(),
+        };
+
         stores
             .s3
             .put_object()
@@ -167,6 +204,17 @@ async fn record_from_aws_snapshot(
             .send()
             .await
             .context("write page snapshot to s3")?;
+
+        stores
+            .s3
+            .put_object()
+            .bucket(&stores.data_bucket)
+            .key(&extracted_payload_path)
+            .content_type("application/json")
+            .body(ByteStream::from(serde_json::to_vec(&extracted_payload)?))
+            .send()
+            .await
+            .context("write extracted page payload to s3")?;
     }
 
     Ok(record)
@@ -189,18 +237,18 @@ impl AwsStores {
             crawl_queue_url: required(args.crawl_queue_url.as_deref(), "ARXIVIST_CRAWL_QUEUE_URL")?,
         })
     }
-    // recieve a message from SQS
-    async fn receive_one(&self) -> Result<Option<aws_sdk_sqs::types::Message>> {
+    // recieve messages from SQS
+    async fn receive_batch(&self, batch_size: i32) -> Result<Vec<aws_sdk_sqs::types::Message>> {
         let output = self
             .sqs
             .receive_message()
             .queue_url(&self.crawl_queue_url)
-            .max_number_of_messages(1)
+            .max_number_of_messages(batch_size)
             .wait_time_seconds(10)
             .send()
             .await
             .context("receive crawl message")?;
-        Ok(output.messages().first().cloned())
+        Ok(output.messages().to_vec())
     }
     // delete a message from SQS
     async fn delete_message(&self, receipt_handle: &str) -> Result<()> {
@@ -215,6 +263,10 @@ impl AwsStores {
     }
     // Add to SQQ queue if url is new
     async fn enqueue_if_new(&self, item: &QueueItem) -> Result<()> {
+        if !filters::is_allowed_crawl_url(&item.url) {
+            return Ok(());
+        }
+
         let url_hash = content_hash(item.url.as_str());
         let put = self
             .dynamodb
@@ -280,38 +332,57 @@ impl AwsStores {
     // write crawl record to dynamodb
     async fn put_record(&self, record: &CrawlRecord) -> Result<()> {
         let url_hash = content_hash(record.requested_url.as_str());
-        let final_url = record
-            .final_url
-            .as_ref()
-            .map(Url::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let (record_json, was_compacted) = dynamodb_record_json(record)?;
+        let (record_json, was_compacted) = dynamodb_metadata_record_json(record)?;
+        let mut item = HashMap::new();
+        item.insert("url_hash".to_owned(), AttributeValue::S(url_hash.clone()));
+        item.insert(
+            "requested_url".to_owned(),
+            AttributeValue::S(record.requested_url.as_str().to_owned()),
+        );
+        put_optional_string(
+            &mut item,
+            "final_url",
+            record.final_url.as_ref().map(Url::as_str),
+        );
+        item.insert(
+            "outcome".to_owned(),
+            AttributeValue::S(outcome_status(record.outcome)),
+        );
+        item.insert(
+            "fetched_at_ms".to_owned(),
+            AttributeValue::N(record.fetched_at_ms.to_string()),
+        );
+        item.insert("record_json".to_owned(), AttributeValue::S(record_json));
+        put_optional_string(&mut item, "title", record.title.as_deref());
+        put_optional_string(&mut item, "content_hash", record.content_hash.as_deref());
+        put_optional_string(&mut item, "content_path", record.content_path.as_deref());
+        put_optional_string(&mut item, "content_type", record.content_type.as_deref());
+        put_optional_number(&mut item, "content_length", record.content_length);
+        let extracted_payload_path = record.extracted_payload_path.clone().or_else(|| {
+            record
+                .content_hash
+                .as_deref()
+                .filter(|_| record.outcome == CrawlOutcome::Stored)
+                .map(record::extracted_payload_path)
+        });
+        put_optional_string(
+            &mut item,
+            "extracted_payload_path",
+            extracted_payload_path.as_deref(),
+        );
 
         if was_compacted {
             warn!(
                 requested_url = %record.requested_url,
                 content_path = ?record.content_path,
-                record_json_bytes = record_json.len(),
-                "compacted crawl record metadata for dynamodb item size limit"
+                "compacted crawl record metadata for dynamodb"
             );
         }
 
         self.dynamodb
             .put_item()
             .table_name(&self.pages_table)
-            .item("url_hash", AttributeValue::S(url_hash.clone()))
-            .item(
-                "requested_url",
-                AttributeValue::S(record.requested_url.as_str().to_owned()),
-            )
-            .item("final_url", AttributeValue::S(final_url))
-            .item("outcome", AttributeValue::S(outcome_status(record.outcome)))
-            .item(
-                "fetched_at_ms",
-                AttributeValue::N(record.fetched_at_ms.to_string()),
-            )
-            .item("record_json", AttributeValue::S(record_json))
+            .set_item(Some(item))
             .send()
             .await
             .context("write crawl record to dynamodb")?;
@@ -341,6 +412,33 @@ impl AwsStores {
     }
 }
 
+fn dynamodb_metadata_record_json(record: &CrawlRecord) -> Result<(String, bool)> {
+    let mut record = record.clone();
+    let compacted = !record.extracted_text.is_empty() || !record.links.is_empty();
+    record.extracted_text.clear();
+    record.links.clear();
+
+    let record_json = serde_json::to_string(&record)?;
+    if record_json.len() <= DYNAMODB_METADATA_JSON_BUDGET_BYTES {
+        return Ok((record_json, compacted));
+    }
+
+    let mut compacted_record = record;
+    compacted_record.title = None;
+    compacted_record.content_type = None;
+    let record_json = serde_json::to_string(&compacted_record)?;
+    if record_json.len() <= DYNAMODB_METADATA_JSON_BUDGET_BYTES {
+        return Ok((record_json, true));
+    }
+
+    anyhow::bail!(
+        "crawl record metadata is {} bytes, above dynamodb metadata budget of {} bytes",
+        record_json.len(),
+        DYNAMODB_METADATA_JSON_BUDGET_BYTES
+    );
+}
+
+#[cfg(test)]
 fn dynamodb_record_json(record: &CrawlRecord) -> Result<(String, bool)> {
     let mut record = record.clone();
     let mut compacted = false;
@@ -392,6 +490,23 @@ fn dynamodb_record_json(record: &CrawlRecord) -> Result<(String, bool)> {
     }
 }
 
+fn put_optional_string(
+    item: &mut HashMap<String, AttributeValue>,
+    name: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
+        item.insert(name.to_owned(), AttributeValue::S(value.to_owned()));
+    }
+}
+
+fn put_optional_number(item: &mut HashMap<String, AttributeValue>, name: &str, value: Option<u64>) {
+    if let Some(value) = value {
+        item.insert(name.to_owned(), AttributeValue::N(value.to_string()));
+    }
+}
+
+#[cfg(test)]
 fn truncate_string(value: &mut String, max_bytes: usize) {
     if value.len() <= max_bytes {
         return;
@@ -427,6 +542,10 @@ fn outcome_status(outcome: CrawlOutcome) -> String {
         CrawlOutcome::FetchFailed => "fetch_failed",
     }
     .to_owned()
+}
+
+fn sqs_batch_size(concurrency: usize) -> i32 {
+    concurrency.clamp(1, 10) as i32
 }
 
 fn is_put_condition_failed<R>(error: &DynamoSdkError<PutItemError, R>) -> bool {
@@ -496,6 +615,7 @@ mod tests {
             content_length: Some(1_000_000),
             content_hash: Some("hash".to_owned()),
             content_path: Some("crawl/content/hash.html".to_owned()),
+            extracted_payload_path: Some("crawl/extracted/hash.json".to_owned()),
             extracted_text: "x".repeat(600 * 1024),
             links: Vec::new(),
             fetched_at_ms: 1,
@@ -512,5 +632,46 @@ mod tests {
         assert!(stored.extracted_text.len() < record.extracted_text.len());
         assert!(stored.links.len() < record.links.len());
         assert_eq!(stored.content_path, record.content_path);
+    }
+
+    #[test]
+    fn dynamodb_metadata_omits_extracted_text_and_links() {
+        let url = Url::parse("https://example.com/stored").unwrap();
+        let record = CrawlRecord {
+            schema_version: 2,
+            requested_url: url.clone(),
+            final_url: Some(url.clone()),
+            source_seed: url,
+            referrer: None,
+            depth: 0,
+            outcome: CrawlOutcome::Stored,
+            skip_reason: None,
+            title: Some("stored".to_owned()),
+            status: Some(200),
+            content_type: Some("text/html".to_owned()),
+            content_length: Some(1_000),
+            content_hash: Some("hash".to_owned()),
+            content_path: Some("crawl/content/hash.html".to_owned()),
+            extracted_payload_path: Some("crawl/extracted/hash.json".to_owned()),
+            extracted_text: "important searchable text".repeat(100),
+            links: vec![Url::parse("https://example.com/linked").unwrap()],
+            fetched_at_ms: 1,
+        };
+
+        let (json, compacted) = dynamodb_metadata_record_json(&record).unwrap();
+        let stored: CrawlRecord = serde_json::from_str(&json).unwrap();
+
+        assert!(compacted);
+        assert!(json.len() <= DYNAMODB_METADATA_JSON_BUDGET_BYTES);
+        assert!(stored.extracted_text.is_empty());
+        assert!(stored.links.is_empty());
+        assert_eq!(stored.content_path, record.content_path);
+    }
+
+    #[test]
+    fn sqs_batch_size_uses_concurrency_with_sqs_limits() {
+        assert_eq!(sqs_batch_size(0), 1);
+        assert_eq!(sqs_batch_size(4), 4);
+        assert_eq!(sqs_batch_size(50), 10);
     }
 }

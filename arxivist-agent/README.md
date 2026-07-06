@@ -1,6 +1,28 @@
-Notes for kevius: currently this folder is a rough sketch of how agents will function. obviously needs improvenment iand further thought. also I think this is best run on lambda at the current moment
+# Arxivist Agent
 
-TODO: 
-- figure out how to keep api keys as environment variables. 
-- I wanna architect the agents graph myself for learning purposes. 
--
+This service owns agentic search. It stays separate from the Rust search API so the graph can evolve
+component by component.
+
+## Local Run
+
+Start the Rust search API first, then run:
+
+```bash
+export OPENAI_API_KEY="<your key>"
+export ARXIVIST_SEARCH_API_BASE_URL=http://127.0.0.1:3000
+uv run uvicorn main:app --reload
+```
+
+Test it:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl -s -X POST http://127.0.0.1:8000/agent/search \
+  -H 'content-type: application/json' \
+  -d '{"query":"transformer retrieval","top_k":5}'
+```
+
+## Production
+
+AWS Lambda reads the OpenAI key from Secrets Manager through `OPENAI_API_KEY_SECRET_NAME`. The secret
+may be either a raw API key string or JSON with an `OPENAI_API_KEY` field.

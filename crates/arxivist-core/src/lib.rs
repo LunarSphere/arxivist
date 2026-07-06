@@ -8,6 +8,11 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use url::Url;
 
+pub const SHARDED_INDEX_SCHEMA_VERSION: u8 = 2;
+pub const DEFAULT_DOC_SHARD_SIZE: usize = 1_000;
+pub const DEFAULT_POSTINGS_SHARD_COUNT: usize = 256;
+pub const MAX_POSTING_POSITIONS: usize = 256;
+
 // Define structs and Enumns
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrawlRecord {
@@ -27,9 +32,17 @@ pub struct CrawlRecord {
     pub content_length: Option<u64>,
     pub content_hash: Option<String>,
     pub content_path: Option<String>,
+    #[serde(default)]
+    pub extracted_payload_path: Option<String>,
     pub extracted_text: String,
     pub links: Vec<Url>,
     pub fetched_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrawlExtractedPayload {
+    pub extracted_text: String,
+    pub links: Vec<Url>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +62,7 @@ pub enum CrawlSkipReason {
     NonHtml,
     EmptyText,
     LikelyJavascriptRequired,
+    NonEnglish,
     FetchError,
     BadHostThreshold,
 }
@@ -66,7 +80,48 @@ pub struct SearchDocument {
 pub struct SearchIndex {
     pub documents: Vec<IndexedDocument>,
     pub terms: HashMap<String, TermStats>,
+    #[serde(default)]
+    pub inverted_index: HashMap<String, Vec<Posting>>,
     pub average_doc_len: f64,
+}
+
+impl SearchIndex {
+    pub fn ensure_inverted_index(&mut self) {
+        if self.inverted_index.is_empty() {
+            self.rebuild_inverted_index();
+        }
+    }
+
+    pub fn rebuild_inverted_index(&mut self) {
+        self.inverted_index.clear();
+
+        for doc in &self.documents {
+            let mut terms = HashSet::new();
+            terms.extend(doc.term_freqs.keys().cloned());
+            terms.extend(doc.title_term_freqs.keys().cloned());
+            terms.extend(doc.url_term_freqs.keys().cloned());
+
+            for term in terms {
+                let body_frequency = doc.term_freqs.get(&term).copied().unwrap_or(0);
+                let title_frequency = doc.title_term_freqs.get(&term).copied().unwrap_or(0);
+                let url_frequency = doc.url_term_freqs.get(&term).copied().unwrap_or(0);
+
+                if body_frequency + title_frequency + url_frequency == 0 {
+                    continue;
+                }
+
+                let body_positions = body_positions(&doc.text, &term);
+                self.inverted_index.entry(term).or_default().push(Posting {
+                    document_id: doc.id,
+                    term_frequency: body_frequency,
+                    body_frequency,
+                    title_frequency,
+                    url_frequency,
+                    body_positions,
+                });
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,12 +132,100 @@ pub struct IndexedDocument {
     pub text: String,
     pub token_count: usize,
     pub term_freqs: HashMap<String, usize>,
+    #[serde(default)]
+    pub title_term_freqs: HashMap<String, usize>,
+    #[serde(default)]
+    pub url_term_freqs: HashMap<String, usize>,
     pub page_rank: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TermStats {
     pub document_frequency: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardedIndexManifest {
+    pub schema_version: u8,
+    pub version: String,
+    pub document_count: usize,
+    pub term_count: usize,
+    pub average_doc_len: f64,
+    pub doc_shard_size: usize,
+    pub doc_shard_count: usize,
+    pub postings_shard_count: usize,
+    pub terms_path: String,
+    pub generated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardedTermStats {
+    pub document_frequency: usize,
+    pub postings_shard: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardedDocument {
+    pub id: usize,
+    pub url: Url,
+    pub title: Option<String>,
+    pub text: String,
+    pub token_count: usize,
+    pub page_rank: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentShard {
+    pub documents: Vec<ShardedDocument>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostingsShard {
+    pub postings: HashMap<String, Vec<Posting>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Posting {
+    pub document_id: usize,
+    #[serde(default)]
+    pub term_frequency: usize,
+    #[serde(default)]
+    pub body_frequency: usize,
+    #[serde(default)]
+    pub title_frequency: usize,
+    #[serde(default)]
+    pub url_frequency: usize,
+    #[serde(default)]
+    pub body_positions: Vec<u32>,
+}
+
+impl Posting {
+    pub fn body_frequency(&self) -> usize {
+        if self.body_frequency == 0 && self.title_frequency == 0 && self.url_frequency == 0 {
+            self.term_frequency
+        } else {
+            self.body_frequency
+        }
+    }
+
+    pub fn total_frequency(&self) -> usize {
+        self.body_frequency() + self.title_frequency + self.url_frequency
+    }
+}
+
+pub fn body_positions(text: &str, term: &str) -> Vec<u32> {
+    tokenize(text)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, token)| {
+            if token == term {
+                Some(position as u32)
+            } else {
+                None
+            }
+        })
+        .take(MAX_POSTING_POSITIONS)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,7 +296,7 @@ pub fn bm25(
     let tf = tf as f64;
     let idf = (((total_docs as f64 - doc_freq as f64 + 0.5) / (doc_freq as f64 + 0.5)) + 1.0).ln();
     let length_norm = 1.0 - b + b * (doc_len as f64 / avg_doc_len.max(1.0));
-    idf * ((tf * (k1 + 1.0)) / (tf + k1 * length_norm))
+    idf * ((tf * (k1 + 1.0)) / (tf + k1 * length_norm)) // bm25 metric
 }
 // term frequence inverse document frequencey | another document relevance metric
 pub fn tfidf(tf: usize, doc_len: usize, total_docs: usize, doc_freq: usize) -> f64 {
@@ -204,6 +347,23 @@ pub fn snippet(text: &str, query_terms: &[String]) -> String {
         .join(" ")
 }
 
+pub fn postings_shard_for_term(term: &str, shard_count: usize) -> usize {
+    if shard_count == 0 {
+        return 0;
+    }
+
+    let mut hash = 2_166_136_261u32;
+    for byte in term.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    hash as usize % shard_count
+}
+
+pub fn document_shard_for_id(document_id: usize, shard_size: usize) -> usize {
+    document_id / shard_size.max(1)
+}
+
 // self explanatory
 pub fn stop_words() -> HashSet<&'static str> {
     STOP_WORDS.iter().copied().collect()
@@ -217,6 +377,7 @@ static STOP_WORDS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn tokenize_normalizes_punctuation_case_and_stop_words() {
@@ -243,6 +404,56 @@ mod tests {
     }
 
     #[test]
+    fn search_index_rebuilds_inverted_index_from_documents() {
+        let mut index = SearchIndex {
+            documents: vec![IndexedDocument {
+                id: 0,
+                url: Url::parse("https://example.com/rust").unwrap(),
+                title: None,
+                text: "rust rust search".to_owned(),
+                token_count: 3,
+                term_freqs: HashMap::from([("rust".to_owned(), 2), ("search".to_owned(), 1)]),
+                title_term_freqs: HashMap::from([("rust".to_owned(), 1)]),
+                url_term_freqs: HashMap::new(),
+                page_rank: 1.0,
+            }],
+            terms: HashMap::from([(
+                "rust".to_owned(),
+                TermStats {
+                    document_frequency: 1,
+                },
+            )]),
+            inverted_index: HashMap::new(),
+            average_doc_len: 3.0,
+        };
+
+        index.ensure_inverted_index();
+        let postings = index.inverted_index.get("rust").unwrap();
+
+        assert_eq!(postings.len(), 1);
+        assert_eq!(postings[0].document_id, 0);
+        assert_eq!(postings[0].term_frequency, 2);
+        assert_eq!(postings[0].body_frequency, 2);
+        assert_eq!(postings[0].title_frequency, 1);
+        assert_eq!(postings[0].body_positions, vec![0, 1]);
+    }
+
+    #[test]
+    fn old_posting_json_defaults_body_positions() {
+        let posting_json = r#"{
+            "document_id": 0,
+            "term_frequency": 2,
+            "body_frequency": 2,
+            "title_frequency": 0,
+            "url_frequency": 0
+        }"#;
+
+        let posting: Posting = serde_json::from_str(posting_json).unwrap();
+
+        assert!(posting.body_positions.is_empty());
+    }
+
+    #[test]
     fn crawl_record_serializes_v2_outcomes() {
         let record = CrawlRecord {
             schema_version: 2,
@@ -259,6 +470,7 @@ mod tests {
             content_length: None,
             content_hash: None,
             content_path: None,
+            extracted_payload_path: None,
             extracted_text: String::new(),
             links: Vec::new(),
             fetched_at_ms: 1,
