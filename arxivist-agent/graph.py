@@ -47,17 +47,27 @@ Use tools when they will improve factual accuracy. Prefer the `search` tool for
 corpus discovery, then inspect stored or live pages only when snippets are not
 enough. You may call tools at most 10 times total.
 
-When you have enough information, write a concise answer that summarizes what
-you found. Include a "Sources" section with the URLs that directly supported the
-answer. Do not invent sources. If a tool fails or returns no useful results,
-state the limitation plainly.
+When the user message includes Local map context, use those OpenStreetMap place
+records for local recommendations. Do not invent additional real businesses or
+locations when that context is present, and do not call `fetch_local_info` again
+unless the supplied map context is explicitly empty or failed.
+
+When you have enough information, answer the user's actual question in a
+concise, plain-language synthesis. For a short topic query, infer that the user
+wants a brief definition or overview of that topic, not a list of search
+results. Lead with the useful explanation and mention only details supported by
+the tool observations. Do not enumerate result titles, URLs, or sources; the
+client renders the structured sources as clickable links below your answer.
+If a tool fails or returns no useful results, state the limitation plainly.
 """
 
 
 FINAL_PROMPT = """
 Write the final answer now using the tool observations already available.
-Summarize what was found and include a "Sources" section with URLs used. Do not
-request more tools.
+Give a concise, direct synthesis that answers the query; for a short topic
+query, provide a brief definition or overview rather than a result list. Do not
+include URLs, markdown links, a Sources section, or a list of source titles:
+the client displays structured sources separately. Do not request more tools.
 """
 
 
@@ -139,8 +149,8 @@ def agent_build():
     agent_builder.add_node("final_answer", final_answer)
 
     agent_builder.add_edge(START, "llm_call")
-    agent_builder.add_conditional_edges("llm_call", should_continue)
-    agent_builder.add_conditional_edges("tool_node", after_tools)
+    agent_builder.add_conditional_edges("llm_call", should_continue) # fancy if stattement so countine if under max tool calls and have budget
+    agent_builder.add_conditional_edges("tool_node", after_tools) # continue if we are less than the max number of tool calls
     agent_builder.add_edge("final_answer", END)
 
     return agent_builder.compile()

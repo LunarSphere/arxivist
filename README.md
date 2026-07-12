@@ -20,6 +20,7 @@ For a broad local English crawl, run one crawler process with 8 async workers.
 the attempted URL safety cap for skipped, blocked, and failed pages.
 
 ```bash
+cd crates
 cargo run -p arxivist-crawler -- \
   --concurrency 8 \
   --target-stored-pages 64000 \
@@ -111,3 +112,10 @@ ARXIVIST_UPSTREAM_AGENT_API_BASE_URL=<hosted agent API URL>
 
 Do not commit the OpenAI API key or add it to frontend/Vercel public variables. The agent reads it
 from its server-side process environment.
+
+## AWS deployment
+
+The production CDK stack and artifact release workflow are documented in
+[`docs/cloud-deployment.md`](docs/cloud-deployment.md). It keeps crawl and
+index releases in S3, serves the selected release from EFS-mounted Fargate
+tasks, and uses the Vercel API proxy for browser requests.

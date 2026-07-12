@@ -11,7 +11,11 @@ export default async function handler(req, res) {
   }
 
   try {
-    const upstream = await fetch(`${upstreamBaseUrl}/health`);
+    const headers = {};
+    if (process.env.ARXIVIST_UPSTREAM_SHARED_SECRET) {
+      headers["x-arxivist-proxy-secret"] = process.env.ARXIVIST_UPSTREAM_SHARED_SECRET;
+    }
+    const upstream = await fetch(`${upstreamBaseUrl}/health`, { headers });
     const text = await upstream.text();
     res.status(upstream.status);
     res.setHeader("content-type", upstream.headers.get("content-type") ?? "application/json");

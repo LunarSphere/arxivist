@@ -10,7 +10,7 @@ pub struct Args {
     #[arg(long, default_value_t = 100)]
     pub max_pages: usize,
     #[arg(long)]
-    pub target_stored_pages: Option<usize>,
+    pub target_stored_pages: Option<usize>, // number of pages we want to keep from a crawl
     #[arg(long, default_value = "demo", env = "ARXIVIST_CRAWL_ID")]
     pub crawl_id: String,
     #[arg(long, default_value_t = 2)]
@@ -18,9 +18,9 @@ pub struct Args {
     #[arg(long, default_value = "data/dev/crawl")]
     pub output_dir: PathBuf,
     #[arg(long, default_value_t = 700)]
-    pub delay_ms: u64,
+    pub delay_ms: u64, // delay between requests to smae host
     #[arg(long, default_value_t = 4)]
-    pub concurrency: usize,
+    pub concurrency: usize, // number of workers to run at a time
     #[arg(long, default_value_t = 3)]
-    pub bad_host_threshold: usize,
+    pub bad_host_threshold: usize, // how many bad links a host has to have to drop it
 }

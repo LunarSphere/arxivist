@@ -2,7 +2,8 @@ const allowedRoutes = new Map([
   ["GET /health", true],
   ["POST /search", true],
   ["GET /agent/health", true],
-  ["POST /agent/search", true]
+  ["POST /agent/search", true],
+  ["POST /places/search", true]
 ]);
 
 function getPath(queryPath) {
@@ -26,8 +27,19 @@ function getBody(req) {
   return JSON.stringify(req.body);
 }
 
+function upstreamHeaders(req) {
+  const headers = {
+    "content-type": req.headers["content-type"] ?? "application/json"
+  };
+  const secret = process.env.ARXIVIST_UPSTREAM_SHARED_SECRET;
+  if (secret) {
+    headers["x-arxivist-proxy-secret"] = secret;
+  }
+  return headers;
+}
+
 function upstreamForPath(path) {
-  if (path.startsWith("/agent/")) {
+  if (path.startsWith("/agent/") || path.startsWith("/places/")) {
     return {
       baseUrl: (process.env.ARXIVIST_UPSTREAM_AGENT_API_BASE_URL ?? "").replace(/\/$/, ""),
       missingMessage: "ARXIVIST_UPSTREAM_AGENT_API_BASE_URL is not configured",
@@ -60,9 +72,7 @@ export default async function handler(req, res) {
   try {
     const upstreamResponse = await fetch(`${upstream.baseUrl}${path}`, {
       method: req.method,
-      headers: {
-        "content-type": req.headers["content-type"] ?? "application/json"
-      },
+      headers: upstreamHeaders(req),
       body: getBody(req)
     });
     const text = await upstreamResponse.text();

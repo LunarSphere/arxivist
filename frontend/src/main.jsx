@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
 import "./styles.css";
 
 const config = window.ARXIVIST_CONFIG ?? {};
@@ -10,6 +12,7 @@ const agentApiBaseUrl = (configuredAgentApiBaseUrl || "http://127.0.0.1:8000").r
 const themeStorageKey = "arxivist-theme";
 const searchPageSize = 10;
 const agentSourceLimit = 5;
+const mapContextWaitMs = 1500;
 
 const suggestionSeeds = [
   "graph neural networks",
@@ -66,38 +69,6 @@ function getSuggestions(query) {
   return [...new Set([...matches, ...fallbacks])].slice(0, 5);
 }
 
-function IconButton({ children, label, onClick, pressed }) {
-  return (
-    <button
-      className="icon-button"
-      type="button"
-      aria-label={label}
-      aria-pressed={pressed}
-      title={label}
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  );
-}
-
-function ThemeIcon({ theme }) {
-  if (theme === "dark") {
-    return (
-      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-        <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z" />
-      </svg>
-    );
-  }
-
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <circle cx="12" cy="12" r="4" />
-      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
-    </svg>
-  );
-}
-
 function ArrowIcon({ direction }) {
   const path = direction === "previous" ? "M15 18l-6-6 6-6" : "M9 6l6 6-6 6";
 
@@ -122,12 +93,6 @@ function SearchBox({ query, setQuery, onSearch, compact = false, loading = false
   return (
     <form className={`search-box ${compact ? "search-box-compact" : ""}`} onSubmit={submit}>
       <div className="search-input-wrap">
-        <span className="search-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" focusable="false">
-            <circle cx="11" cy="11" r="7" />
-            <path d="m16.5 16.5 4 4" />
-          </svg>
-        </span>
         <label className="visually-hidden" htmlFor={compact ? "results-query" : "home-query"}>
           Search query
         </label>
@@ -135,14 +100,19 @@ function SearchBox({ query, setQuery, onSearch, compact = false, loading = false
           id={compact ? "results-query" : "home-query"}
           value={query}
           type="search"
-          placeholder="Search papers, methods, and demo crawl pages"
+          placeholder={compact ? "Search the index..." : "Enter your search query..."}
           autoComplete="off"
           onChange={(event) => setQuery(event.target.value)}
           onFocus={() => setFocused(true)}
           onBlur={() => window.setTimeout(() => setFocused(false), 120)}
         />
+      </div>
+      <div className="search-controls">
         <button className="search-submit" type="submit" disabled={loading || !query.trim()}>
-          Search
+          ⌕ Search it!
+        </button>
+        <button className="search-clear" type="button" onClick={() => setQuery("")} disabled={!query}>
+          Clear
         </button>
       </div>
 
@@ -171,22 +141,46 @@ function SearchBox({ query, setQuery, onSearch, compact = false, loading = false
 
 function ModeSwitch({ searchMode, onModeChange }) {
   return (
-    <div className="mode-switch" aria-label="Search mode">
+    <nav className="mode-switch" aria-label="Search mode">
       <button
         className={searchMode === "traditional" ? "active" : ""}
         type="button"
         onClick={() => onModeChange("traditional")}
       >
-        Search
+        ⌕ Search
       </button>
       <button
-        className={searchMode === "agent" ? "active" : ""}
+        className={searchMode === "maps" ? "active" : ""}
         type="button"
-        onClick={() => onModeChange("agent")}
+        onClick={() => onModeChange("maps")}
       >
-        AI
+        ♧ Map
       </button>
-    </div>
+    </nav>
+  );
+}
+
+function AppChrome({ theme, toggleTheme, searchMode, onModeChange, searchAssistEnabled, onSearchAssistToggle }) {
+  return (
+    <header className="app-chrome">
+      <div className="masthead">
+        <span aria-hidden="true">◉</span> ARXIVIST SEARCH ENGINE <span className="masthead-version">v2.4</span>
+        <div className="chrome-actions">
+          <button
+            className={`assist-toggle ${searchAssistEnabled ? "active" : ""}`}
+            type="button"
+            aria-pressed={searchAssistEnabled}
+            onClick={onSearchAssistToggle}
+          >
+            AI {searchAssistEnabled ? "ON" : "OFF"}
+          </button>
+          <button className="theme-toggle" type="button" onClick={toggleTheme}>
+            {theme === "dark" ? "☼ LIGHT" : "☾ DARK"}
+          </button>
+        </div>
+      </div>
+      <ModeSwitch searchMode={searchMode} onModeChange={onModeChange} />
+    </header>
   );
 }
 
@@ -199,24 +193,26 @@ function SearchHome({
   toggleTheme,
   loading,
   searchMode,
-  onModeChange
+  onModeChange,
+  searchAssistEnabled,
+  onSearchAssistToggle
 }) {
   return (
     <main className="home-shell">
-      <header className="home-actions" aria-label="Page controls">
-        <button className="text-button" type="button" onClick={() => onModeChange("agent")}>AI</button>
-        <IconButton label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} pressed={theme === "dark"} onClick={toggleTheme}>
-          <ThemeIcon theme={theme} />
-        </IconButton>
-        <IconButton label="Menu">Menu</IconButton>
-      </header>
+      <AppChrome
+        theme={theme}
+        toggleTheme={toggleTheme}
+        searchMode={searchMode}
+        onModeChange={onModeChange}
+        searchAssistEnabled={searchAssistEnabled}
+        onSearchAssistToggle={onSearchAssistToggle}
+      />
 
       <section className="home-panel" aria-labelledby="page-title">
-        <h1 id="page-title" className="brand">Arxivist</h1>
-        <ModeSwitch searchMode={searchMode} onModeChange={onModeChange} />
+        <h1 id="page-title" className="brand">{searchMode === "maps" ? "Arxivist Atlas" : "Arxivist"}</h1>
+        <p className="home-kicker">{searchMode === "maps" ? "Explore places with research context" : health}</p>
         <SearchBox query={query} setQuery={setQuery} onSearch={onSearch} loading={loading} />
-        <p className="tagline">Private, focused search across your indexed research corpus.</p>
-        <p className="health-line">{health}</p>
+        <p className="tagline">{searchMode === "maps" ? "Search a topic, then locate related places nearby." : "Focused search across your indexed research corpus."}</p>
       </section>
     </main>
   );
@@ -240,49 +236,59 @@ function SearchResults({
   hasNext,
   searchMode,
   onModeChange,
-  agentAssist
+  searchAssistEnabled,
+  onSearchAssistToggle,
+  agentAssist,
+  mapSearch,
+  manualLocation,
+  setManualLocation,
+  mapRadius,
+  onRadiusChange
 }) {
   const showPagination = totalResults > 0 && totalPages > 0 && !message;
 
   return (
     <main className="results-page">
-      <header className="results-top">
+      <AppChrome
+        theme={theme}
+        toggleTheme={toggleTheme}
+        searchMode={searchMode}
+        onModeChange={onModeChange}
+        searchAssistEnabled={searchAssistEnabled}
+        onSearchAssistToggle={onSearchAssistToggle}
+      />
+
+      <section className={`results-hero ${searchMode === "maps" ? "atlas-hero" : ""}`}>
         <button className="mini-brand" type="button" onClick={() => onSearch("", { home: true })}>
-          Arxivist
+          {searchMode === "maps" ? "Arxivist Atlas" : "Arxivist"}
         </button>
+        {searchMode === "maps" ? <p>Explore places with research context</p> : null}
         <SearchBox query={query} setQuery={setQuery} onSearch={onSearch} compact loading={loading} />
-        <div className="results-actions">
-          <button
-            className={`text-button ${searchMode === "agent" ? "active" : ""}`}
-            type="button"
-            onClick={() => onModeChange(searchMode === "agent" ? "traditional" : "agent")}
-          >
-            AI
-          </button>
-          <IconButton label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} pressed={theme === "dark"} onClick={toggleTheme}>
-            <ThemeIcon theme={theme} />
-          </IconButton>
-        </div>
-      </header>
-
-      <nav className="tabs" aria-label="Result types">
-        <a className={searchMode === "traditional" ? "active" : ""} href="#results" onClick={() => onModeChange("traditional")}>All</a>
-        <a href="#results">Papers</a>
-        <a href="#results">Books</a>
-        <a href="#results">Code</a>
-        <a className={searchMode === "agent" ? "active" : ""} href="#results" onClick={() => onModeChange("agent")}>AI</a>
-      </nav>
-
-      <section className="filter-row" aria-label="Search filters">
-        <span>{status}</span>
-        <span>{health}</span>
       </section>
 
-      <section id="results" className="results-shell" aria-live="polite">
-        {searchMode === "agent" ? <SearchAssist assist={agentAssist} /> : null}
-        {loading ? <StateMessage title="Searching" body="Looking through the current index." /> : null}
-        {!loading && message ? <StateMessage title={message.title} body={message.body} tone={message.tone} /> : null}
-        {!loading && !message ? (
+      {searchMode === "traditional" ? (
+        <section className="filter-row" aria-label="Search status">
+          <span>{status}</span>
+          <span>{health}</span>
+        </section>
+      ) : null}
+
+      <section id="results" className={`results-shell ${searchMode === "maps" ? "map-results-shell" : ""}`} aria-live="polite">
+        {searchMode === "traditional" && searchAssistEnabled ? <SearchAssist assist={agentAssist} /> : null}
+        {searchMode === "maps" ? (
+          <MapSearch
+            search={query}
+            mapSearch={mapSearch}
+            manualLocation={manualLocation}
+            setManualLocation={setManualLocation}
+            mapRadius={mapRadius}
+            onRadiusChange={onRadiusChange}
+            onSearch={onSearch}
+          />
+        ) : null}
+        {searchMode !== "maps" && loading ? <StateMessage title="Searching" body="Looking through the current index." /> : null}
+        {searchMode !== "maps" && !loading && message ? <StateMessage title={message.title} body={message.body} tone={message.tone} /> : null}
+        {searchMode !== "maps" && !loading && !message ? (
           <>
             <ol className="result-list">
               {results.map((item) => (
@@ -305,6 +311,165 @@ function SearchResults({
       </section>
     </main>
   );
+}
+
+function MapSearch({
+  search,
+  mapSearch,
+  manualLocation,
+  setManualLocation,
+  mapRadius,
+  onRadiusChange,
+  onSearch
+}) {
+  return (
+    <section className="map-search" aria-label="Nearby map search">
+      <div className="map-controls">
+        <div className="map-location-field">
+          <label htmlFor="map-location">Location</label>
+          <input
+            id="map-location"
+            value={manualLocation}
+            onChange={(event) => setManualLocation(event.target.value)}
+            placeholder="Use my location or enter a city, address, or ZIP"
+          />
+        </div>
+        <label className="map-radius-field" htmlFor="map-radius">
+          Radius
+          <select id="map-radius" value={mapRadius} onChange={(event) => onRadiusChange(Number(event.target.value))}>
+            <option value={1000}>1 km</option>
+            <option value={5000}>5 km</option>
+            <option value={10000}>10 km</option>
+          </select>
+        </label>
+        <button className="map-search-button" type="button" onClick={() => onSearch(search, { mode: "maps" })} disabled={!search.trim()}>
+          Search nearby
+        </button>
+      </div>
+
+      {mapSearch.status === "loading" ? <StateMessage title="Finding nearby places" body="Resolving your location and querying OpenStreetMap." /> : null}
+      {mapSearch.status === "location-required" ? (
+        <StateMessage title="Location needed" body="Allow location access or enter a city, address, or ZIP code above." />
+      ) : null}
+      {mapSearch.status === "error" ? <StateMessage title="Map search unavailable" body={mapSearch.error} tone="error" /> : null}
+      {mapSearch.status === "success" ? <PlaceMap data={mapSearch.data} /> : null}
+    </section>
+  );
+}
+
+function PlaceMap({ data }) {
+  const mapElement = useRef(null);
+  const mapInstance = useRef(null);
+  const markerLayer = useRef(null);
+  const markers = useRef([]);
+
+  useEffect(() => {
+    if (!mapElement.current) {
+      return undefined;
+    }
+    const map = L.map(mapElement.current, { scrollWheelZoom: true });
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap contributors</a>'
+    }).addTo(map);
+    markerLayer.current = L.layerGroup().addTo(map);
+    mapInstance.current = map;
+    return () => {
+      map.remove();
+      mapInstance.current = null;
+      markerLayer.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const map = mapInstance.current;
+    const layer = markerLayer.current;
+    if (!map || !layer || !data) {
+      return;
+    }
+    layer.clearLayers();
+    markers.current = [];
+    const center = [data.center.latitude, data.center.longitude];
+    const bounds = L.latLngBounds(center, center);
+    L.circle(center, { radius: data.radius_m, color: "#65b87a", fillOpacity: 0.06, weight: 1 }).addTo(layer);
+
+    data.places.forEach((place, index) => {
+      const point = [place.latitude, place.longitude];
+      bounds.extend(point);
+      const marker = L.marker(point, {
+        icon: L.divIcon({
+          className: "map-marker",
+          html: String(index + 1),
+          iconSize: [28, 28],
+          iconAnchor: [14, 14]
+        })
+      }).addTo(layer);
+      marker.bindPopup(`<strong>${escapeHtml(place.name)}</strong><br>${escapeHtml(place.category)}`);
+      markers.current[index] = marker;
+    });
+    map.fitBounds(bounds, { padding: [30, 30], maxZoom: 15 });
+    window.setTimeout(() => map.invalidateSize(), 0);
+  }, [data]);
+
+  function focusPlace(index) {
+    const place = data.places[index];
+    const marker = markers.current[index];
+    if (!place || !marker || !mapInstance.current) {
+      return;
+    }
+    mapInstance.current.setView([place.latitude, place.longitude], Math.max(mapInstance.current.getZoom(), 15));
+    marker.openPopup();
+  }
+
+  return (
+    <div className="map-result-layout">
+      <div ref={mapElement} className="map-canvas" aria-label="OpenStreetMap results map" />
+      <div className="place-list">
+        <div className="place-list-header">
+          <span>{data.places.length.toLocaleString()} places</span>
+          <span>{data.source === "nominatim-fallback" ? "OSM fallback" : (data.center.label || "Search area")}</span>
+        </div>
+        {data.places.length === 0 ? <p className="place-empty">No mapped places matched this search.</p> : null}
+        {data.places.map((place, index) => (
+          <div
+            className="place-item"
+            key={place.id}
+            role="button"
+            tabIndex={0}
+            onClick={() => focusPlace(index)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                focusPlace(index);
+              }
+            }}
+          >
+            <span className="place-number">{index + 1}</span>
+            <div>
+              <h2>{place.name}</h2>
+              <p>
+                {place.category}
+                {place.distance_m != null ? ` · ${formatDistance(place.distance_m)}` : ""}
+                {place.address ? ` · ${place.address}` : ""}
+              </p>
+              {place.website ? <a href={place.website} target="_blank" rel="noreferrer">Website</a> : null}
+            </div>
+          </div>
+        ))}
+        <p className="map-attribution">{data.attribution}</p>
+      </div>
+    </div>
+  );
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>'"]/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "'": "&#39;",
+    '"': "&quot;"
+  })[character]);
 }
 
 function SearchAssist({ assist }) {
@@ -375,6 +540,15 @@ function sourceLabel(url) {
   } catch {
     return url;
   }
+}
+
+function formatDistance(distanceMeters) {
+  if (!Number.isFinite(distanceMeters)) {
+    return "";
+  }
+  return distanceMeters < 1000
+    ? `${Math.round(distanceMeters)} m`
+    : `${(distanceMeters / 1000).toFixed(1)} km`;
 }
 
 function PaginationFooter({
@@ -450,8 +624,17 @@ function App() {
   const [totalResults, setTotalResults] = useState(0);
   const [hasPrevious, setHasPrevious] = useState(false);
   const [hasNext, setHasNext] = useState(false);
+  const [searchAssistEnabled, setSearchAssistEnabled] = useState(false);
   const [agentAssist, setAgentAssist] = useState({ status: "idle" });
+  const [mapSearch, setMapSearch] = useState({ status: "idle" });
+  const [manualLocation, setManualLocation] = useState("");
+  const [mapRadius, setMapRadius] = useState(5000);
   const agentRequestId = useRef(0);
+  const mapRequestId = useRef(0);
+  const searchCache = useRef(new Map());
+  const inFlightRequests = useRef(new Map());
+  const browserLocation = useRef(null);
+  const browserLocationRequest = useRef(null);
 
   useEffect(() => {
     let active = true;
@@ -478,6 +661,107 @@ function App() {
       active = false;
     };
   }, []);
+
+  function cacheKey(...parts) {
+    return JSON.stringify(parts);
+  }
+
+  function requestOnce(key, request) {
+    const pending = inFlightRequests.current.get(key);
+    if (pending) {
+      return pending;
+    }
+    const nextRequest = Promise.resolve().then(request).finally(() => {
+      if (inFlightRequests.current.get(key) === nextRequest) {
+        inFlightRequests.current.delete(key);
+      }
+    });
+    inFlightRequests.current.set(key, nextRequest);
+    return nextRequest;
+  }
+
+  function getBrowserLocation() {
+    if (browserLocation.current) {
+      return Promise.resolve(browserLocation.current);
+    }
+    if (!navigator.geolocation) {
+      return Promise.resolve(null);
+    }
+    if (!browserLocationRequest.current) {
+      browserLocationRequest.current = new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: false,
+          timeout: 8000,
+          maximumAge: 300000
+        });
+      }).then((position) => {
+        browserLocation.current = {
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude
+        };
+        return browserLocation.current;
+      }).catch(() => null).finally(() => {
+        browserLocationRequest.current = null;
+      });
+    }
+    return browserLocationRequest.current;
+  }
+
+  function applyTraditionalPayload(payload, requestedPage) {
+    const nextResults = payload.results ?? [];
+    const nextPage = payload.page ?? requestedPage;
+    const nextTotalPages = payload.total_pages ?? 0;
+    const nextTotalResults = payload.total_results ?? nextResults.length;
+    setResults(nextResults);
+    setCurrentPage(nextPage);
+    setTotalPages(nextTotalPages);
+    setTotalResults(nextTotalResults);
+    setHasPrevious(Boolean(payload.has_previous));
+    setHasNext(Boolean(payload.has_next));
+    setStatus(
+      nextTotalResults === 0
+        ? "No results found"
+        : `Page ${nextPage.toLocaleString()} of ${nextTotalPages.toLocaleString()} / ${nextTotalResults.toLocaleString()} results`
+    );
+    setMessage(
+      nextTotalResults === 0
+        ? { title: "No results found", body: "Try a broader phrase or check whether the crawler has indexed related pages." }
+        : null
+    );
+  }
+
+  function isLocalIntent(nextQuery) {
+    return /\b(near me|nearby|restaurant|restaurants|burger|burgers|coffee|cafe|cafes|bar|pub|brewery|library|libraries|park|parks|hotel|hotels|store|stores|shop|shops|food)\b/i.test(nextQuery);
+  }
+
+  function prefetchRelatedSearches(nextQuery, requestedMode, requestedRadius, includeAssist) {
+    const shouldFetchMap = requestedMode === "maps" || isLocalIntent(nextQuery);
+    if (!shouldFetchMap) {
+      if (includeAssist) {
+        runAgentSearch(nextQuery, null);
+      }
+      return;
+    }
+
+    if (!includeAssist) {
+      runMapSearch(nextQuery, requestedRadius);
+      return;
+    }
+
+    let agentStarted = false;
+    function startAgent(mapResult) {
+      if (agentStarted) {
+        return;
+      }
+      agentStarted = true;
+      runAgentSearch(nextQuery, mapResult?.data ?? null, mapResult?.location ?? null);
+    }
+
+    runMapSearch(nextQuery, requestedRadius).then(startAgent);
+    window.setTimeout(() => {
+      startAgent({ data: null, location: browserLocation.current });
+    }, mapContextWaitMs);
+  }
 
   async function search(nextQuery, options = {}) {
     const trimmedQuery = nextQuery.trim();
@@ -507,50 +791,39 @@ function App() {
     setMessage(null);
     setResults([]);
     setStatus("Searching...");
-    if (requestedMode === "agent" && requestedPage === 1) {
-      runAgentSearch(trimmedQuery);
-    } else if (requestedMode !== "agent") {
-      agentRequestId.current += 1;
-      setAgentAssist({ status: "idle" });
-    }
+    prefetchRelatedSearches(
+      trimmedQuery,
+      requestedMode,
+      options.radius ?? mapRadius,
+      searchAssistEnabled
+    );
 
     try {
-      const response = await fetch(apiUrl("/search"), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          query: trimmedQuery,
-          page: requestedPage,
-          page_size: searchPageSize,
-          mode: "traditional"
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`Search failed with ${response.status}`);
+      const traditionalKey = cacheKey("traditional", trimmedQuery, requestedPage);
+      const cachedTraditional = searchCache.current.get(traditionalKey);
+      if (cachedTraditional) {
+        applyTraditionalPayload(cachedTraditional, requestedPage);
+        return;
       }
 
-      const payload = await response.json();
-      const nextResults = payload.results ?? [];
-      const nextPage = payload.page ?? requestedPage;
-      const nextTotalPages = payload.total_pages ?? 0;
-      const nextTotalResults = payload.total_results ?? nextResults.length;
-      setResults(nextResults);
-      setCurrentPage(nextPage);
-      setTotalPages(nextTotalPages);
-      setTotalResults(nextTotalResults);
-      setHasPrevious(Boolean(payload.has_previous));
-      setHasNext(Boolean(payload.has_next));
-      setStatus(
-        nextTotalResults === 0
-          ? "No results found"
-          : `Page ${nextPage.toLocaleString()} of ${nextTotalPages.toLocaleString()} / ${nextTotalResults.toLocaleString()} results`
-      );
-      setMessage(
-        nextTotalResults === 0
-          ? { title: "No results found", body: "Try a broader phrase or check whether the crawler has indexed related pages." }
-          : null
-      );
+      const payload = await requestOnce(traditionalKey, async () => {
+        const response = await fetch(apiUrl("/search"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            query: trimmedQuery,
+            page: requestedPage,
+            page_size: searchPageSize,
+            mode: "traditional"
+          })
+        });
+        if (!response.ok) {
+          throw new Error(`Search failed with ${response.status}`);
+        }
+        return response.json();
+      });
+      searchCache.current.set(traditionalKey, payload);
+      applyTraditionalPayload(payload, requestedPage);
     } catch (error) {
       setStatus("Search unavailable");
       setTotalPages(0);
@@ -567,30 +840,54 @@ function App() {
     }
   }
 
-  async function runAgentSearch(nextQuery) {
+  async function runAgentSearch(nextQuery, mapData, locationContext = null) {
     const requestId = agentRequestId.current + 1;
     agentRequestId.current = requestId;
     setAgentAssist({ status: "loading" });
 
-    try {
-      const response = await fetch(agentApiUrl("/agent/search"), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          query: nextQuery,
-          top_k: searchPageSize,
-          context: agentContext()
-        })
+    const mapContextKey = mapData
+      ? cacheKey(
+        mapData.center?.latitude,
+        mapData.center?.longitude,
+        (mapData.places ?? []).map((place) => place.id)
+      )
+      : locationContext
+        ? cacheKey(locationContext.latitude, locationContext.longitude)
+        : "none";
+    const agentKey = cacheKey("agent", nextQuery.trim(), searchPageSize, mapContextKey);
+    const cachedAgent = searchCache.current.get(agentKey);
+    if (cachedAgent) {
+      setAgentAssist({
+        status: "success",
+        answer: cachedAgent.answer ?? "",
+        sources: cachedAgent.sources ?? [],
+        toolCallCount: cachedAgent.tool_call_count ?? 0,
+        llmCalls: cachedAgent.llm_calls ?? 0
       });
+      return;
+    }
 
-      if (!response.ok) {
-        throw new Error(`Agent search failed with ${response.status}`);
-      }
-
-      const payload = await response.json();
+    try {
+      const payload = await requestOnce(agentKey, async () => {
+        const response = await fetch(agentApiUrl("/agent/search"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            query: nextQuery,
+            top_k: searchPageSize,
+            context: agentContext(mapData, locationContext),
+            nearby_places: mapData?.places ?? []
+          })
+        });
+        if (!response.ok) {
+          throw new Error(`Agent search failed with ${response.status}`);
+        }
+        return response.json();
+      });
       if (agentRequestId.current !== requestId) {
         return;
       }
+      searchCache.current.set(agentKey, payload);
       setAgentAssist({
         status: "success",
         answer: payload.answer ?? "",
@@ -609,19 +906,115 @@ function App() {
     }
   }
 
-  function agentContext() {
+  async function runMapSearch(nextQuery, radius = mapRadius) {
+    const requestId = mapRequestId.current + 1;
+    mapRequestId.current = requestId;
+    setMapRadius(radius);
+    setMapSearch({ status: "loading" });
+
+    const location = manualLocation.trim();
+    const mapKey = cacheKey("maps", nextQuery.trim(), radius, location);
+    const cachedMap = searchCache.current.get(mapKey);
+    if (cachedMap) {
+      setMapSearch({ status: "success", data: cachedMap });
+      return { data: cachedMap, location: cachedMap.center };
+    }
+
+    const position = location ? null : await getBrowserLocation();
+
+    if (!position && !location) {
+      if (mapRequestId.current === requestId) {
+        setMapSearch({ status: "location-required" });
+      }
+      return { data: null, location: null };
+    }
+
+    const body = {
+      query: nextQuery,
+      radius_m: radius,
+      limit: 50
+    };
+    if (position) {
+      body.latitude = position.latitude;
+      body.longitude = position.longitude;
+    } else {
+      body.location = location;
+    }
+
+    const mapRequestKey = cacheKey(
+      mapKey,
+      position?.latitude,
+      position?.longitude
+    );
+    try {
+      const payload = await requestOnce(mapRequestKey, async () => {
+        const response = await fetch(agentApiUrl("/places/search"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        if (!response.ok) {
+          const errorPayload = await response.json().catch(() => ({}));
+          throw new Error(errorPayload.detail || `Map search failed with ${response.status}`);
+        }
+        return response.json();
+      });
+      if (mapRequestId.current === requestId) {
+        searchCache.current.set(mapKey, payload);
+        setMapSearch({ status: "success", data: payload });
+      }
+      return { data: payload, location: payload.center };
+    } catch (error) {
+      if (mapRequestId.current === requestId) {
+        setMapSearch({ status: "error", error: error.message });
+      }
+      return {
+        data: null,
+        location: position
+      };
+    }
+  }
+
+  function agentContext(mapData, locationContext) {
     const now = new Date();
-    return {
+    const context = {
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       locale: navigator.language,
       local_time: now.toISOString()
     };
+    const center = mapData?.center ?? locationContext;
+    if (center) {
+      context.latitude = center.latitude;
+      context.longitude = center.longitude;
+      context.approx_location = center.label;
+    }
+    return context;
   }
 
   function changeMode(nextMode) {
     setSearchMode(nextMode);
     if (pageMode === "results" && query.trim()) {
       search(query, { mode: nextMode, page: 1 });
+    }
+  }
+
+  function toggleSearchAssist() {
+    const nextEnabled = !searchAssistEnabled;
+    setSearchAssistEnabled(nextEnabled);
+    if (!nextEnabled) {
+      agentRequestId.current += 1;
+      setAgentAssist({ status: "idle" });
+      return;
+    }
+    if (pageMode === "results" && query.trim()) {
+      prefetchRelatedSearches(query, searchMode, mapRadius, true);
+    }
+  }
+
+  function changeMapRadius(nextRadius) {
+    setMapRadius(nextRadius);
+    if (pageMode === "results" && query.trim()) {
+      search(query, { mode: "maps", page: 1, radius: nextRadius });
     }
   }
 
@@ -639,6 +1032,8 @@ function App() {
         loading={loading}
         searchMode={searchMode}
         onModeChange={changeMode}
+        searchAssistEnabled={searchAssistEnabled}
+        onSearchAssistToggle={toggleSearchAssist}
       />
     );
   }
@@ -662,7 +1057,14 @@ function App() {
       hasNext={hasNext}
       searchMode={searchMode}
       onModeChange={changeMode}
+      searchAssistEnabled={searchAssistEnabled}
+      onSearchAssistToggle={toggleSearchAssist}
       agentAssist={agentAssist}
+      mapSearch={mapSearch}
+      manualLocation={manualLocation}
+      setManualLocation={setManualLocation}
+      mapRadius={mapRadius}
+      onRadiusChange={changeMapRadius}
     />
   );
 }

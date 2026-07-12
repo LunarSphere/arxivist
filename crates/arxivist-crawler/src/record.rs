@@ -1,4 +1,5 @@
 // record page content fills out appropriate structs
+// defines how we actually save our cralwed contnet
 use crate::{
     args::Args,
     extract,

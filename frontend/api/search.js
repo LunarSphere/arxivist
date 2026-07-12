@@ -14,7 +14,10 @@ export default async function handler(req, res) {
     const upstream = await fetch(`${upstreamBaseUrl}/search`, {
       method: "POST",
       headers: {
-        "content-type": req.headers["content-type"] ?? "application/json"
+        "content-type": req.headers["content-type"] ?? "application/json",
+        ...(process.env.ARXIVIST_UPSTREAM_SHARED_SECRET
+          ? { "x-arxivist-proxy-secret": process.env.ARXIVIST_UPSTREAM_SHARED_SECRET }
+          : {})
       },
       body: typeof req.body === "string" ? req.body : JSON.stringify(req.body ?? {})
     });

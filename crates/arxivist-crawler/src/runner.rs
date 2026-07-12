@@ -40,6 +40,8 @@ pub async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
+// We want to do the crawl state this way so workers picking tasks from the state dont conflict with each other
+
 // Shared local crawl state used by every async worker.
 // The crawler has one frontier, one dedupe set, and one set of counters.
 struct CrawlState {
@@ -51,6 +53,7 @@ struct CrawlState {
     output_lock: Mutex<()>,
 }
 
+// where the fields we wanna mutate are workers access them by locking
 struct CrawlStateInner {
     // FIFO crawl frontier. Workers pop from here until it is empty or budgets are exhausted.
     queue: VecDeque<QueueItem>,
@@ -111,7 +114,7 @@ impl CrawlState {
             output_lock: Mutex::new(()),
         }
     }
-
+    // grabs next page from the innercrawlstate
     async fn next_item(&self, args: &Args) -> Option<QueueItem> {
         loop {
             let notified = self.notify.notified();
@@ -172,6 +175,7 @@ impl CrawlState {
         tokio::time::sleep_until(slot).await; // slep until workers reserved slot
     }
 
+    // when we are done with and item update innercrawlstates internal stats
     async fn finish_item(
         &self,
         args: &Args,
@@ -229,7 +233,7 @@ impl CrawlState {
         self.notify.notify_waiters();
         stats
     }
-
+    // fallback for when a page has no host
     async fn mark_written_only(&self) -> FinishStats {
         let mut inner = self.inner.lock().await;
         inner.written += 1;
@@ -251,7 +255,7 @@ impl CrawlState {
 }
 
 async fn worker(worker_id: usize, args: Arc<Args>, state: Arc<CrawlState>) -> Result<()> {
-    // how delay the host wants between requests
+    // how long to wait between requests to a host
     let host_delay = Duration::from_millis(args.delay_ms);
     // while we can get the next url from the queue
     while let Some(item) = state.next_item(&args).await {
@@ -274,7 +278,7 @@ async fn worker(worker_id: usize, args: Arc<Args>, state: Arc<CrawlState>) -> Re
                 Some(CrawlSkipReason::FetchError),
             ),
         };
-
+        // save results ro .jsonl
         let append_result = {
             let _guard = state.output_lock.lock().await;
             record::append(&args.output_dir, &record)
@@ -297,6 +301,7 @@ async fn worker(worker_id: usize, args: Arc<Args>, state: Arc<CrawlState>) -> Re
     Ok(())
 }
 
+//create blank files to write data to
 fn prepare_local_output(args: &Args) -> Result<()> {
     // Local adapters write metadata plus payload files so downstream tools can
     // run even after a crawl that finds no storable pages.
@@ -306,7 +311,7 @@ fn prepare_local_output(args: &Args) -> Result<()> {
         .create(true)
         .append(true)
         .open(args.output_dir.join("pages.jsonl"))
-        .context("create crawl metadata file")?;
+        .context("create crawl metadata file")?; // jsonl file creation
     Ok(())
 }
 
@@ -408,6 +413,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(args.output_dir);
     }
 
+    // nothing here is compiled in the main crawler. just dummy data
     fn args(seeds: Vec<Url>) -> Args {
         Args {
             seeds,

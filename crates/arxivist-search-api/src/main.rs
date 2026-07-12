@@ -5,8 +5,10 @@ use arxivist_core::{
 };
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Request, State},
     http::{HeaderValue, Method},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use clap::Parser;
@@ -21,8 +23,15 @@ use std::{
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
+const MAX_QUERY_TERMS: usize = 12;
+const MAX_RETRIEVAL_TERMS: usize = 8;
+const MAX_RANKED_CANDIDATES: usize = 2_000;
+const MAX_PREFIX_EXPANSIONS: usize = 8;
+
 #[derive(Debug, Parser)]
 struct Args {
+    // `clap` turns these fields into CLI flags. For example:
+    // `--index data/dev/index --bind 127.0.0.1:3000`.
     #[arg(long, default_value = "data/dev/index")]
     index: PathBuf,
     #[arg(long, default_value = "127.0.0.1:3000")]
@@ -35,24 +44,37 @@ struct Args {
 
 #[derive(Clone)]
 struct AppState {
+    // Axum clones state for each request. `Arc` makes those clones cheap and
+    // lets every request share the same loaded index instead of re-reading it.
     index: Arc<LoadedIndex>,
+    proxy_shared_secret: Option<Arc<str>>,
 }
 
 enum LoadedIndex {
+    // The API accepts both the old single-file index and the newer sharded
+    // index while the system is being rebuilt component by component.
     Legacy(SearchIndex),
     Sharded(ShardedIndex),
 }
 
 struct ShardedIndex {
+    // The manifest describes the sharded index layout: document count, shard
+    // sizes, average document length, and where the term metadata lives.
     manifest: ShardedIndexManifest,
+    // Term stats stay in memory because every search needs quick access to
+    // document frequencies and the postings shard for each matching term.
     terms: HashMap<String, ShardedTermStats>,
     store: ShardedIndexStore,
+    // Postings and documents are loaded lazily by shard. The mutex protects
+    // the small in-memory cache when multiple HTTP requests arrive at once.
     postings_cache: tokio::sync::Mutex<ShardCache<PostingsShard>>,
     doc_cache: tokio::sync::Mutex<ShardCache<DocumentShard>>,
 }
 
 #[derive(Clone)]
 enum ShardedIndexStore {
+    // This boundary is intentionally small so an AWS/S3 store can be added
+    // later without changing the search/ranking code.
     Local { root: PathBuf },
 }
 
@@ -64,6 +86,7 @@ struct ShardCache<T> {
 
 #[derive(Debug, Deserialize)]
 struct SearchRequest {
+    // This struct is the JSON body clients send to POST /search.
     query: String,
     #[serde(default)]
     top_k: Option<isize>,
@@ -84,6 +107,7 @@ enum SearchMode {
 
 #[derive(Debug, Serialize)]
 struct SearchResponse {
+    // This struct is serialized back to JSON by `Json(SearchResponse)`.
     query: String,
     mode: String,
     results: Vec<RankedResult>,
@@ -97,6 +121,7 @@ struct SearchResponse {
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
+    // Lightweight JSON returned by GET /health for local checks and monitors.
     status: &'static str,
     documents: usize,
     terms: usize,
@@ -110,22 +135,39 @@ struct HealthResponse {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Set up structured logging before the server starts handling requests.
     tracing_subscriber::fmt()
         .with_env_filter("info")
         .compact()
         .init();
 
+    // Load command-line configuration and the search index once at startup.
+    // Request handlers receive shared access through `AppState`.
     let args = Args::parse();
     let index = load_index(&args).await?;
     let state = AppState {
         index: Arc::new(index),
+        proxy_shared_secret: std::env::var("ARXIVIST_PROXY_SHARED_SECRET")
+            .ok()
+            .filter(|secret| !secret.is_empty())
+            .map(Arc::from),
     };
 
+    // `Router` is the API table. Each route maps an HTTP method and path to
+    // an async handler function below.
     let app = Router::new()
-        .route("/health", get(health)) //is our api end point alive
-        .route("/search", post(search)) // SEARCH FOR THE PAGES
-        .with_state(state)
+        .route("/health", get(health))
+        .route("/search", post(search))
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_proxy_secret,
+        ))
+        // CORS allows browser-based frontends on another origin to call this
+        // API during local development.
         .layer(cors_layer())
+        // TraceLayer logs one span per HTTP request, which is useful when
+        // debugging slow or failing API calls.
         .layer(TraceLayer::new_for_http());
 
     info!(bind = %args.bind, "starting search api");
@@ -134,7 +176,32 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Production requests come through the Vercel proxy. Leaving the secret unset
+/// keeps local development simple, while health checks remain unauthenticated.
+async fn require_proxy_secret(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.uri().path() == "/health" || state.proxy_shared_secret.is_none() {
+        return next.run(request).await;
+    }
+
+    let expected = state.proxy_shared_secret.as_deref().expect("checked above");
+    let provided = request
+        .headers()
+        .get("x-arxivist-proxy-secret")
+        .and_then(|value| value.to_str().ok());
+    if provided == Some(expected) {
+        next.run(request).await
+    } else {
+        (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+    }
+}
+
 async fn load_index(args: &Args) -> Result<LoadedIndex> {
+    // A directory means the new sharded format; a file means the old legacy
+    // JSON format. Supporting both keeps older local data usable.
     if args.index.is_dir() {
         let manifest_path = args.index.join("manifest.json");
         let manifest: ShardedIndexManifest =
@@ -184,10 +251,14 @@ impl ShardedIndex {
     }
 
     async fn postings_shard(&self, shard: usize) -> Result<Arc<PostingsShard>> {
+        // Search first asks the cache for the postings shard. A cache hit keeps
+        // the request from touching disk for terms seen in recent searches.
         if let Some(value) = self.postings_cache.lock().await.get(shard) {
             return Ok(value);
         }
 
+        // A cache miss loads the shard artifact, decodes JSON into Rust
+        // structs, and stores it for future requests.
         let path = format!("postings/{shard}.json");
         let shard_value: PostingsShard = serde_json::from_slice(&self.store.read(&path).await?)
             .with_context(|| format!("decode postings shard {shard}"))?;
@@ -200,6 +271,8 @@ impl ShardedIndex {
     }
 
     async fn doc_shard(&self, shard: usize) -> Result<Arc<DocumentShard>> {
+        // Document shards hold titles, URLs, text, and PageRank values used
+        // after candidate documents have been found through postings.
         if let Some(value) = self.doc_cache.lock().await.get(shard) {
             return Ok(value);
         }
@@ -216,6 +289,7 @@ impl ShardedIndex {
     }
 
     async fn document(&self, document_id: usize) -> Option<ShardedDocument> {
+        // Document IDs determine which shard contains the full document data.
         let shard = document_shard_for_id(document_id, self.manifest.doc_shard_size);
         let docs = self.doc_shard(shard).await.ok()?;
         docs.documents
@@ -227,6 +301,7 @@ impl ShardedIndex {
 
 impl ShardedIndexStore {
     async fn read(&self, path: &str) -> Result<Vec<u8>> {
+        // This is the storage adapter boundary for sharded artifacts.
         match self {
             ShardedIndexStore::Local { root } => {
                 let path = root.join(path);
@@ -276,6 +351,8 @@ impl<T> ShardCache<T> {
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    // `State(state)` is Axum's extractor syntax: Axum pulls the shared
+    // AppState out of the router and passes it into this handler.
     let (documents, terms, index_version, postings_cache_shards, doc_cache_shards) = match state
         .index
         .as_ref()
@@ -303,10 +380,14 @@ async fn search(
     State(state): State<AppState>,
     Json(request): Json<SearchRequest>,
 ) -> Json<SearchResponse> {
+    // `Json(request)` tells Axum to deserialize the request body into
+    // SearchRequest. Returning `Json(...)` serializes SearchResponse back.
     Json(search_loaded_index(&state.index, request).await)
 }
 
 async fn search_loaded_index(index: &LoadedIndex, request: SearchRequest) -> SearchResponse {
+    // Keep the public API stable while routing internally to whichever index
+    // format was loaded at startup.
     match index {
         LoadedIndex::Legacy(index) => search_index(index, request),
         LoadedIndex::Sharded(index) => search_sharded_index(index, request).await,
@@ -314,8 +395,12 @@ async fn search_loaded_index(index: &LoadedIndex, request: SearchRequest) -> Sea
 }
 
 async fn search_sharded_index(index: &ShardedIndex, request: SearchRequest) -> SearchResponse {
-    let terms = tokenize(&request.query);
-    let index_terms = matching_sharded_index_terms(index, &terms);
+    // The sharded search path only loads the postings/document shards needed
+    // for the current query instead of loading every document into memory.
+    let terms = search_terms(&request.query);
+    let index_terms = retrieval_terms(matching_sharded_index_terms(index, &terms), |term| {
+        index.terms.get(term).map(|stats| stats.document_frequency)
+    });
     let mut candidate_scores: HashMap<usize, CandidateScore> = HashMap::new();
 
     for (query_term, index_term) in &index_terms {
@@ -332,57 +417,31 @@ async fn search_sharded_index(index: &ShardedIndex, request: SearchRequest) -> S
             inverse_document_frequency(index.manifest.document_count, stats.document_frequency);
 
         for posting in postings {
-            let Some(doc) = index.document(posting.document_id).await else {
-                continue;
-            };
-            let body_frequency = posting.body_frequency();
-
-            let bm25_score = bm25(
-                body_frequency,
-                doc.token_count,
-                index.manifest.average_doc_len,
-                index.manifest.document_count,
-                stats.document_frequency,
-            );
-            let tfidf_score = tfidf(
-                body_frequency,
-                doc.token_count,
-                index.manifest.document_count,
-                stats.document_frequency,
-            );
-            let title_score = posting.title_frequency as f64 * idf * 3.0;
-            let url_score = posting.url_frequency as f64 * idf * 1.5;
             let score = candidate_scores
                 .entry(posting.document_id)
                 .or_insert_with(CandidateScore::default);
-            score.bm25 += bm25_score;
-            score.tfidf += tfidf_score;
-            score.field_boost += title_score + url_score;
-            score.matched_query_terms.insert(query_term.clone());
-            score
-                .body_positions_by_query_term
-                .entry(query_term.clone())
-                .or_default()
-                .extend(posting.body_positions.iter().copied());
+            score.add_posting(query_term, posting, stats.document_frequency, idf);
         }
     }
 
+    let candidate_scores = select_candidates(candidate_scores, &terms, &index_terms);
     let mut results = Vec::with_capacity(candidate_scores.len());
     for (document_id, score_parts) in candidate_scores {
         let Some(doc) = index.document(document_id).await else {
             continue;
         };
 
+        let (bm25_score, tfidf_score, field_boost) = score_parts.document_scores(
+            doc.token_count,
+            index.manifest.average_doc_len,
+            index.manifest.document_count,
+        );
         let phrase_boost =
             exact_phrase_boost_for_fields(&request.query, doc.title.as_deref(), &doc.text);
         let proximity_boost = proximity_boost(&terms, &score_parts.body_positions_by_query_term);
         let coordination_boost =
             1.0 + (score_parts.matched_query_terms.len().saturating_sub(1) as f64 * 0.12);
-        let text_score = (score_parts.bm25
-            + score_parts.tfidf
-            + score_parts.field_boost
-            + phrase_boost
-            + proximity_boost)
+        let text_score = (bm25_score + tfidf_score + field_boost + phrase_boost + proximity_boost)
             * coordination_boost;
         let score = text_score * doc.page_rank.max(0.1);
         if score > 0.0 {
@@ -391,8 +450,8 @@ async fn search_sharded_index(index: &ShardedIndex, request: SearchRequest) -> S
                 title: doc.title,
                 snippet: snippet(&doc.text, &terms),
                 score,
-                bm25_score: score_parts.bm25,
-                tfidf_score: score_parts.tfidf,
+                bm25_score,
+                tfidf_score,
                 page_rank: doc.page_rank,
             });
         }
@@ -402,8 +461,10 @@ async fn search_sharded_index(index: &ShardedIndex, request: SearchRequest) -> S
 }
 
 fn search_index(index: &SearchIndex, request: SearchRequest) -> SearchResponse {
-    let terms = tokenize(&request.query);
-    let index_terms = matching_index_terms(index, &terms);
+    let terms = search_terms(&request.query);
+    let index_terms = retrieval_terms(matching_index_terms(index, &terms), |term| {
+        index.terms.get(term).map(|stats| stats.document_frequency)
+    });
     let mut candidate_scores: HashMap<usize, CandidateScore> = HashMap::new();
 
     // The inverted index gives us only documents containing at least one query
@@ -418,56 +479,30 @@ fn search_index(index: &SearchIndex, request: SearchRequest) -> SearchResponse {
         let idf = inverse_document_frequency(index.documents.len(), stats.document_frequency);
 
         for posting in postings {
-            let Some(doc) = index.documents.get(posting.document_id) else {
-                continue;
-            };
-            let body_frequency = posting.body_frequency();
-
-            let bm25_score = bm25(
-                body_frequency,
-                doc.token_count,
-                index.average_doc_len,
-                index.documents.len(),
-                stats.document_frequency,
-            );
-            let tfidf_score = tfidf(
-                body_frequency,
-                doc.token_count,
-                index.documents.len(),
-                stats.document_frequency,
-            );
-            let title_score = posting.title_frequency as f64 * idf * 3.0;
-            let url_score = posting.url_frequency as f64 * idf * 1.5;
             let score = candidate_scores
                 .entry(posting.document_id)
                 .or_insert_with(CandidateScore::default);
-            score.bm25 += bm25_score;
-            score.tfidf += tfidf_score;
-            score.field_boost += title_score + url_score;
-            score.matched_query_terms.insert(query_term.clone());
-            score
-                .body_positions_by_query_term
-                .entry(query_term.clone())
-                .or_default()
-                .extend(posting.body_positions.iter().copied());
+            score.add_posting(query_term, posting, stats.document_frequency, idf);
         }
     }
 
+    let candidate_scores = select_candidates(candidate_scores, &terms, &index_terms);
     let mut results = Vec::with_capacity(candidate_scores.len());
     for (document_id, score_parts) in candidate_scores {
         let Some(doc) = index.documents.get(document_id) else {
             continue;
         };
 
+        let (bm25_score, tfidf_score, field_boost) = score_parts.document_scores(
+            doc.token_count,
+            index.average_doc_len,
+            index.documents.len(),
+        );
         let phrase_boost = exact_phrase_boost(&request.query, doc);
         let proximity_boost = proximity_boost(&terms, &score_parts.body_positions_by_query_term);
         let coordination_boost =
             1.0 + (score_parts.matched_query_terms.len().saturating_sub(1) as f64 * 0.12);
-        let text_score = (score_parts.bm25
-            + score_parts.tfidf
-            + score_parts.field_boost
-            + phrase_boost
-            + proximity_boost)
+        let text_score = (bm25_score + tfidf_score + field_boost + phrase_boost + proximity_boost)
             * coordination_boost;
         let score = text_score * doc.page_rank.max(0.1);
         if score > 0.0 {
@@ -476,8 +511,8 @@ fn search_index(index: &SearchIndex, request: SearchRequest) -> SearchResponse {
                 title: doc.title.clone(),
                 snippet: snippet(&doc.text, &terms),
                 score,
-                bm25_score: score_parts.bm25,
-                tfidf_score: score_parts.tfidf,
+                bm25_score,
+                tfidf_score,
                 page_rank: doc.page_rank,
             });
         }
@@ -487,6 +522,8 @@ fn search_index(index: &SearchIndex, request: SearchRequest) -> SearchResponse {
 }
 
 fn finish_response(request: SearchRequest, mut results: Vec<RankedResult>) -> SearchResponse {
+    // All search paths end here so sorting and pagination stay consistent for
+    // both legacy and sharded indexes.
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
     let pagination = Pagination::from_request(&request);
     let total_results = results.len();
@@ -519,11 +556,194 @@ fn finish_response(request: SearchRequest, mut results: Vec<RankedResult>) -> Se
 
 #[derive(Default)]
 struct CandidateScore {
-    bm25: f64,
-    tfidf: f64,
-    field_boost: f64,
+    provisional_score: f64,
+    posting_matches: Vec<PostingMatch>,
     matched_query_terms: HashSet<String>,
     body_positions_by_query_term: HashMap<String, Vec<u32>>,
+}
+
+struct PostingMatch {
+    document_frequency: usize,
+    body_frequency: usize,
+    title_frequency: usize,
+    url_frequency: usize,
+}
+
+impl CandidateScore {
+    fn add_posting(
+        &mut self,
+        query_term: &str,
+        posting: &arxivist_core::Posting,
+        document_frequency: usize,
+        idf: f64,
+    ) {
+        let body_frequency = posting.body_frequency();
+        self.provisional_score += body_frequency as f64 * idf
+            + posting.title_frequency as f64 * idf * 3.0
+            + posting.url_frequency as f64 * idf * 1.5;
+        self.posting_matches.push(PostingMatch {
+            document_frequency,
+            body_frequency,
+            title_frequency: posting.title_frequency,
+            url_frequency: posting.url_frequency,
+        });
+        self.matched_query_terms.insert(query_term.to_owned());
+        self.body_positions_by_query_term
+            .entry(query_term.to_owned())
+            .or_default()
+            .extend(posting.body_positions.iter().copied());
+    }
+
+    fn document_scores(
+        &self,
+        token_count: usize,
+        average_doc_len: f64,
+        document_count: usize,
+    ) -> (f64, f64, f64) {
+        self.posting_matches
+            .iter()
+            .fold((0.0, 0.0, 0.0), |scores, matched| {
+                let idf = inverse_document_frequency(document_count, matched.document_frequency);
+                (
+                    scores.0
+                        + bm25(
+                            matched.body_frequency,
+                            token_count,
+                            average_doc_len,
+                            document_count,
+                            matched.document_frequency,
+                        ),
+                    scores.1
+                        + tfidf(
+                            matched.body_frequency,
+                            token_count,
+                            document_count,
+                            matched.document_frequency,
+                        ),
+                    scores.2
+                        + matched.title_frequency as f64 * idf * 3.0
+                        + matched.url_frequency as f64 * idf * 1.5,
+                )
+            })
+    }
+}
+
+fn search_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for term in tokenize(query) {
+        if is_meaningful_query_term(&term) && !terms.contains(&term) {
+            terms.push(term);
+        }
+        if terms.len() == MAX_QUERY_TERMS {
+            break;
+        }
+    }
+
+    if let Some(compact) = normalize_compact_query(query) {
+        if !terms.iter().any(|term| term == &compact) {
+            terms.push(compact);
+        }
+    }
+
+    terms
+}
+
+fn normalize_compact_query(query: &str) -> Option<String> {
+    if !query.chars().any(char::is_whitespace) || tokenize(query).len() > 2 || query.len() > 32 {
+        return None;
+    }
+
+    let compact: String = query
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+
+    if compact.len() >= 3 {
+        Some(compact)
+    } else {
+        None
+    }
+}
+
+fn is_meaningful_query_term(term: &str) -> bool {
+    term.chars().count() >= 3
+        && !matches!(
+            term,
+            "a" | "an"
+                | "and"
+                | "are"
+                | "as"
+                | "at"
+                | "be"
+                | "by"
+                | "for"
+                | "from"
+                | "how"
+                | "in"
+                | "is"
+                | "it"
+                | "of"
+                | "on"
+                | "or"
+                | "that"
+                | "the"
+                | "this"
+                | "to"
+                | "was"
+                | "what"
+                | "when"
+                | "where"
+                | "which"
+                | "who"
+                | "with"
+                | "you"
+        )
+}
+
+fn retrieval_terms<F>(
+    mut matches: Vec<(String, String)>,
+    document_frequency: F,
+) -> Vec<(String, String)>
+where
+    F: Fn(&str) -> Option<usize>,
+{
+    // Rare terms create smaller candidate sets and are the safest fallback.
+    matches.sort_by_key(|(_, index_term)| document_frequency(index_term).unwrap_or(usize::MAX));
+    matches.truncate(MAX_RETRIEVAL_TERMS);
+    matches
+}
+
+fn select_candidates(
+    candidates: HashMap<usize, CandidateScore>,
+    query_terms: &[String],
+    retrieval_terms: &[(String, String)],
+) -> Vec<(usize, CandidateScore)> {
+    let required_matches = if query_terms.len() > 1 { 2 } else { 1 };
+    let fallback_term = retrieval_terms.first().map(|(query_term, _)| query_term);
+    let use_fallback = required_matches > 1
+        && !candidates
+            .values()
+            .any(|score| score.matched_query_terms.len() >= required_matches);
+
+    let mut selected: Vec<_> = candidates
+        .into_iter()
+        .filter(|(_, score)| {
+            if use_fallback {
+                fallback_term.is_some_and(|term| score.matched_query_terms.contains(term))
+            } else {
+                score.matched_query_terms.len() >= required_matches
+            }
+        })
+        .collect();
+    selected.sort_by(|(_, left), (_, right)| {
+        right
+            .provisional_score
+            .partial_cmp(&left.provisional_score)
+            .unwrap_or(Ordering::Equal)
+    });
+    selected.truncate(MAX_RANKED_CANDIDATES);
+    selected
 }
 
 fn proximity_boost(
@@ -604,7 +824,7 @@ fn matching_index_terms(index: &SearchIndex, query_terms: &[String]) -> Vec<(Str
         }
     }
 
-    if !matches.is_empty() {
+    if !matches.is_empty() || query_terms.len() != 1 {
         return matches;
     }
 
@@ -622,7 +842,7 @@ fn matching_index_terms(index: &SearchIndex, query_terms: &[String]) -> Vec<(Str
             .collect();
         expanded_terms.sort();
 
-        for expanded_term in expanded_terms.into_iter().take(8) {
+        for expanded_term in expanded_terms.into_iter().take(MAX_PREFIX_EXPANSIONS) {
             if seen.insert((term.clone(), expanded_term.clone())) {
                 matches.push((term.clone(), expanded_term));
             }
@@ -643,7 +863,7 @@ fn matching_sharded_index_terms(
         }
     }
 
-    if !matches.is_empty() {
+    if !matches.is_empty() || query_terms.len() != 1 {
         return matches;
     }
 
@@ -661,7 +881,7 @@ fn matching_sharded_index_terms(
             .collect();
         expanded_terms.sort();
 
-        for expanded_term in expanded_terms.into_iter().take(8) {
+        for expanded_term in expanded_terms.into_iter().take(MAX_PREFIX_EXPANSIONS) {
             if seen.insert((term.clone(), expanded_term.clone())) {
                 matches.push((term.clone(), expanded_term));
             }
@@ -720,7 +940,9 @@ impl Pagination {
     }
 }
 
-//cross origin resource sharing. tldr for running apis locally. never heard of this before.
+// Cross-Origin Resource Sharing controls which browser origins can call this
+// API. The default "*" is convenient locally; production can set
+// ARXIVIST_CORS_ORIGIN to a specific frontend URL.
 fn cors_layer() -> CorsLayer {
     let origin = std::env::var("ARXIVIST_CORS_ORIGIN").unwrap_or_else(|_| "*".to_owned());
     let layer = CorsLayer::new()
@@ -833,18 +1055,57 @@ mod tests {
     }
 
     #[test]
-    fn multi_term_search_unions_posting_candidates() {
+    fn multi_term_search_requires_two_matches_then_falls_back_to_rarest_term() {
         let index = two_term_index();
         let response = search_index(&index, request("rust python", None, None, None));
-        let urls: Vec<_> = response
-            .results
-            .iter()
-            .map(|result| result.url.as_str().to_owned())
+
+        assert_eq!(response.total_results, 1);
+        assert_eq!(response.results[0].url.as_str(), "https://example.com/rust");
+    }
+
+    #[test]
+    fn multiword_no_match_does_not_use_prefix_expansion() {
+        let index = SearchIndex {
+            documents: Vec::new(),
+            terms: HashMap::from([(
+                "neuralnetwork".to_owned(),
+                TermStats {
+                    document_frequency: 1,
+                },
+            )]),
+            inverted_index: HashMap::from([("neuralnetwork".to_owned(), Vec::new())]),
+            average_doc_len: 0.0,
+        };
+
+        let matches = matching_index_terms(&index, &["neural".to_owned(), "retrieval".to_owned()]);
+
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn candidate_selection_caps_document_level_ranking_work() {
+        let candidates = (0..MAX_RANKED_CANDIDATES + 25)
+            .map(|id| {
+                (
+                    id,
+                    CandidateScore {
+                        provisional_score: id as f64,
+                        posting_matches: Vec::new(),
+                        matched_query_terms: HashSet::from(["rust".to_owned()]),
+                        body_positions_by_query_term: HashMap::new(),
+                    },
+                )
+            })
             .collect();
 
-        assert_eq!(response.total_results, 2);
-        assert!(urls.contains(&"https://example.com/rust".to_owned()));
-        assert!(urls.contains(&"https://example.com/python".to_owned()));
+        let selected = select_candidates(
+            candidates,
+            &["rust".to_owned()],
+            &[("rust".to_owned(), "rust".to_owned())],
+        );
+
+        assert_eq!(selected.len(), MAX_RANKED_CANDIDATES);
+        assert_eq!(selected[0].0, MAX_RANKED_CANDIDATES + 24);
     }
 
     #[test]
@@ -1122,6 +1383,87 @@ mod tests {
         assert!(
             proximity_boost(&tokenize("formula 1"), &exact)
                 > proximity_boost(&tokenize("formula 1"), &nearby)
+        );
+    }
+
+    #[test]
+    fn spaced_query_also_matches_compact_token() {
+        let index = SearchIndex {
+            documents: vec![document(
+                0,
+                "https://example.com/formula_1",
+                Some("Formula 1"),
+                "motorsport racing notes",
+                HashMap::new(),
+                HashMap::from([("formula1".to_owned(), 1)]),
+                HashMap::new(),
+            )],
+            terms: HashMap::from([(
+                "formula1".to_owned(),
+                TermStats {
+                    document_frequency: 1,
+                },
+            )]),
+            inverted_index: HashMap::from([("formula1".to_owned(), vec![posting(0, 0, 1, 0)])]),
+            average_doc_len: 3.0,
+        };
+
+        let response = search_index(&index, request("formula 1", None, None, None));
+
+        assert_eq!(response.total_results, 1);
+        assert_eq!(response.results[0].title.as_deref(), Some("Formula 1"));
+    }
+
+    #[test]
+    fn short_secondary_terms_do_not_broaden_multi_term_candidates() {
+        let index = SearchIndex {
+            documents: vec![
+                document(
+                    0,
+                    "https://example.com/formula",
+                    Some("Formula"),
+                    "formula racing notes",
+                    HashMap::from([("formula".to_owned(), 1)]),
+                    HashMap::new(),
+                    HashMap::new(),
+                ),
+                document(
+                    1,
+                    "https://example.com/one",
+                    Some("Number One"),
+                    "1 standings notes",
+                    HashMap::from([("1".to_owned(), 1)]),
+                    HashMap::new(),
+                    HashMap::new(),
+                ),
+            ],
+            terms: HashMap::from([
+                (
+                    "formula".to_owned(),
+                    TermStats {
+                        document_frequency: 1,
+                    },
+                ),
+                (
+                    "1".to_owned(),
+                    TermStats {
+                        document_frequency: 1,
+                    },
+                ),
+            ]),
+            inverted_index: HashMap::from([
+                ("formula".to_owned(), vec![posting(0, 1, 0, 0)]),
+                ("1".to_owned(), vec![posting(1, 1, 0, 0)]),
+            ]),
+            average_doc_len: 3.0,
+        };
+
+        let response = search_index(&index, request("formula 1", None, None, None));
+
+        assert_eq!(response.total_results, 1);
+        assert_eq!(
+            response.results[0].url.as_str(),
+            "https://example.com/formula"
         );
     }
 

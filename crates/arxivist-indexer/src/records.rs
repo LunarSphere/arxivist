@@ -6,7 +6,7 @@ use std::{
     path::Path,
 };
 
-// read the records of the crawled pages. i guess creates a json object we can work with in rust.
+// read the records of the crawled pages. converts json info into a vector of crawl record structs
 pub fn read_records(path: &Path) -> Result<Vec<CrawlRecord>> {
     let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let reader = BufReader::new(file);

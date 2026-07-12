@@ -1,0 +1,4 @@
+FROM public.ecr.aws/aws-cli/aws-cli:2.22.35
+COPY sync-release.sh /usr/local/bin/sync-release
+RUN chmod +x /usr/local/bin/sync-release
+ENTRYPOINT ["/usr/local/bin/sync-release"]
